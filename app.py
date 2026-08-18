@@ -1,52 +1,73 @@
-"""AutoResearch: Multi-Agent Research Pipeline (REAL Data Fetching)"""
+"""AutoResearch: Multi-Agent Research Pipeline (REAL Data Fetching + Rate Limit Handling)"""
 import streamlit as st
 import requests
 import json
 import random
+import time
+import re
 from groq import Groq
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-# ---------- 1. REAL RETRIEVAL AGENT (Semantic Scholar API) ----------
+# ---------- 1. REAL RETRIEVAL AGENT (Semantic Scholar API with retry & cleaning) ----------
 def retrieval_agent(topic, max_results=10):
     """
     Fetch REAL papers from Semantic Scholar.
-    No API key required! Returns a list of papers with title, abstract, citations, year.
+    - Cleans query (removes punctuation, limits words)
+    - Handles rate limits (429) with exponential backoff
+    - Returns list of papers with title, abstract, citations, year, authors
     """
-    # Semantic Scholar API endpoint
-    url = "https://api.semanticscholar.org/graph/v1/paper/search"
+    # ----- CLEAN THE QUERY -----
+    # Remove punctuation and extra spaces
+    clean_topic = re.sub(r'[^\w\s]', ' ', topic)
+    clean_topic = ' '.join(clean_topic.split()[:6])  # Keep first 6 words max
     
+    if len(clean_topic.split()) < 2:
+        clean_topic = topic  # fallback if too short
+    
+    url = "https://api.semanticscholar.org/graph/v1/paper/search"
     params = {
-        "query": topic,
+        "query": clean_topic,
         "limit": max_results,
         "fields": "title,abstract,citationCount,year,authors"
     }
     
-    try:
-        response = requests.get(url, params=params, timeout=10)
-        response.raise_for_status()  # Raise error if bad status
-        
-        data = response.json()
-        papers = []
-        
-        for item in data.get("data", []):
-            # Skip papers without abstracts (can't analyze them)
-            if not item.get("abstract"):
-                continue
-                
-            papers.append({
-                "title": item.get("title", "No Title"),
-                "abstract": item.get("abstract", ""),
-                "citations": item.get("citationCount", 0),
-                "year": item.get("year", 0),
-                "authors": [a.get("name", "") for a in item.get("authors", [])[:3]]
-            })
+    # ----- RETRY LOGIC FOR RATE LIMITS (429) -----
+    for attempt in range(3):
+        try:
+            response = requests.get(url, params=params, timeout=10)
             
-        return papers
-        
-    except Exception as e:
-        st.error(f"❌ Failed to fetch real papers: {e}. Please check your internet connection or try a different topic.")
-        return []  # Return empty list if API fails
+            if response.status_code == 429:
+                wait_time = 5 * (attempt + 1)  # 5s, 10s, 15s
+                st.warning(f"⏳ Rate limit hit. Waiting {wait_time} seconds... (attempt {attempt+1}/3)")
+                time.sleep(wait_time)
+                continue  # retry
+                
+            response.raise_for_status()
+            data = response.json()
+            papers = []
+            
+            for item in data.get("data", []):
+                if not item.get("abstract"):
+                    continue
+                papers.append({
+                    "title": item.get("title", "No Title"),
+                    "abstract": item.get("abstract", ""),
+                    "citations": item.get("citationCount", 0),
+                    "year": item.get("year", 0),
+                    "authors": [a.get("name", "") for a in item.get("authors", [])[:3]]
+                })
+            
+            if not papers:
+                st.info(f"🔍 No results found for '{clean_topic}'. Try broader terms like 'LLM reasoning'.")
+            
+            return papers
+            
+        except requests.exceptions.RequestException as e:
+            if attempt == 2:  # last attempt
+                st.error(f"❌ Failed to fetch: {e}. Please wait 1 minute and try a shorter topic.")
+                return []
+            time.sleep(2)  # wait before next attempt
 
 # ---------- 2. CLASSICAL ML AGENT (TF-IDF Filtering) ----------
 def relevance_filter_agent(topic, papers):
@@ -110,8 +131,9 @@ def gap_analysis_agent(topic, papers, api_key):
         st.warning(f"⚠️ LLM API issue ({e}). Using fallback gaps based on citations.")
         # Fallback: generate gaps based on citation patterns (so it's never 100% dummy)
         if top_papers:
+            avg_cites = sum(p['citations'] for p in top_papers) // len(top_papers)
             return [
-                {"description": f"Highly cited papers (avg {sum(p['citations'] for p in top_papers)//len(top_papers)} cites) focus on specific datasets. Generalization remains a gap.", "impact_score": 8},
+                {"description": f"Highly cited papers (avg {avg_cites} cites) focus on specific datasets. Generalization remains a gap.", "impact_score": 8},
                 {"description": "Computational efficiency is rarely benchmarked across these papers, limiting real-world deployment.", "impact_score": 7},
                 {"description": "Cross-domain validation beyond the medical imaging domain is missing in the current literature.", "impact_score": 6}
             ]
@@ -158,11 +180,15 @@ st.set_page_config(page_title="AutoResearch", page_icon="🔬", layout="wide")
 st.title("🔬 AutoResearch: Multi-Agent Research Assistant")
 st.markdown("*Fetches REAL papers → TF-IDF Filtering → Llama-3 Gap Analysis*")
 
-# Sidebar for API Key
+# Sidebar for API Key – auto-populate from secrets if available
 with st.sidebar:
     st.header("🔑 Configuration")
-    api_key = st.text_input("Groq API Key", type="password", 
-                           help="Get free key at console.groq.com")
+    
+    # Try to get API key from secrets first, otherwise ask user to type
+    default_key = st.secrets.get("GROQ_API_KEY", "")
+    api_key = st.text_input("Groq API Key", type="password", value=default_key if default_key else "",
+                           help="Get free key at console.groq.com. If you set GROQ_API_KEY in secrets, leave this blank.")
+    
     if not api_key:
         st.warning("Enter your Groq API key to use real AI gap detection.")
     st.markdown("---")
@@ -175,9 +201,9 @@ with st.form("research_form"):
 
 if submitted:
     if not api_key:
-        st.error("Please paste your Groq API key in the sidebar to proceed.")
+        st.error("Please provide a Groq API key (either in sidebar or set GROQ_API_KEY in secrets).")
     elif not topic or len(topic.strip()) < 3:
-        st.error("Please enter a valid research topic.")
+        st.error("Please enter a valid research topic (at least 3 characters).")
     else:
         papers, gaps, hypotheses, total_citations, avg_citations = run_research_pipeline(
             topic, max_papers, api_key
