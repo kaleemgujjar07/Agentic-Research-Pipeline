@@ -113,7 +113,7 @@ def generate_hypotheses(papers, gaps):
 
 st.set_page_config(page_title="AutoResearch", page_icon="🔬", layout="wide")
 st.title("🔬 AutoResearch: Multi-Agent Research Assistant")
-st.markdown("Live literature search across **arXiv** and **Semantic Scholar** — no dummy data.")
+st.markdown("Live literature search across **arXiv** and **Semantic Scholar**.")
 
 with st.form("research_form"):
     topic = st.text_input("Research Topic", placeholder="e.g., transformer architectures for medical image segmentation")
