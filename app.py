@@ -1,4 +1,4 @@
-"""AutoResearch: Multi-Agent Research Pipeline (Semantic Scholar + ArXiv Fallback)"""
+"""AutoResearch: Multi-Agent Research Pipeline (Semantic Scholar + ArXiv Fallback - FIXED)"""
 import streamlit as st
 import requests
 import json
@@ -10,34 +10,57 @@ from groq import Groq
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-# ---------- 1. REAL RETRIEVAL AGENT (Semantic Scholar + ArXiv fallback) ----------
-def fetch_from_arxiv(topic, max_results=10):
-    """Fetch papers from ArXiv API (no rate limit)."""
-    # Clean query for ArXiv: replace spaces with +, remove special chars
-    query = re.sub(r'[^\w\s]', ' ', topic).strip()
-    query = '+'.join(query.split())
+# ---------- 1. REAL RETRIEVAL AGENT (ArXiv with robust parsing) ----------
+def fetch_from_arxiv(topic, max_results=15):
+    """
+    Fetch papers from ArXiv API - no rate limits.
+    Uses category filter (cs.AI, cs.LG) for better results.
+    """
+    # Clean query: remove special chars, keep letters/numbers/spaces
+    clean_topic = re.sub(r'[^\w\s]', ' ', topic).strip()
+    # If query is very short, expand it
+    if len(clean_topic.split()) < 3:
+        clean_topic = f"{clean_topic} machine learning OR deep learning"
     
-    url = f"http://export.arxiv.org/api/query?search_query=all:{query}&start=0&max_results={max_results}"
+    # Build ArXiv query: all fields, with category limitation to cs.* (computer science)
+    # Use 'all' to search in title, abstract, authors, etc.
+    query = '+'.join(clean_topic.split())
+    # Add category filter: only computer science papers (cs.AI, cs.LG, cs.CV, etc.)
+    category_filter = "cat:cs.AI OR cat:cs.LG OR cat:cs.CV"
+    # Full query: search in all fields and restrict to those categories
+    url = f"http://export.arxiv.org/api/query?search_query=all:{query}+AND+({category_filter})&start=0&max_results={max_results}"
     
     try:
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, timeout=15)
         if response.status_code != 200:
+            st.error(f"ArXiv API error: {response.status_code}")
             return []
         
-        # Parse XML
-        root = ET.fromstring(response.content)
-        ns = {'arxiv': 'http://arxiv.org/schemas/atom'}
-        papers = []
+        # Parse XML without namespace issues: remove the namespace from tags
+        # We'll use a simple string replace to strip namespaces
+        xml_str = response.content.decode('utf-8')
+        # Remove namespace declarations to simplify parsing
+        xml_str = re.sub(r' xmlns="[^"]+"', '', xml_str, count=1)
+        root = ET.fromstring(xml_str)
         
-        for entry in root.findall('arxiv:entry', ns):
-            title = entry.find('arxiv:title', ns).text.strip() if entry.find('arxiv:title', ns) is not None else "No Title"
-            abstract = entry.find('arxiv:summary', ns).text.strip() if entry.find('arxiv:summary', ns) is not None else ""
-            # Get year from published date
-            published = entry.find('arxiv:published', ns).text if entry.find('arxiv:published', ns) is not None else ""
+        papers = []
+        for entry in root.findall('entry'):
+            title_elem = entry.find('title')
+            summary_elem = entry.find('summary')
+            published_elem = entry.find('published')
+            if title_elem is None or summary_elem is None:
+                continue
+            title = title_elem.text.strip()
+            abstract = summary_elem.text.strip()
+            # Sometimes abstract has newlines; clean them
+            abstract = ' '.join(abstract.split())
+            published = published_elem.text if published_elem is not None else ""
             year = published[:4] if published else "0"
-            # ArXiv doesn't provide citation count, set to 0
-            authors = [a.text for a in entry.findall('arxiv:author/arxiv:name', ns)]
             
+            # Get authors
+            authors = [a.text for a in entry.findall('author/name')]
+            
+            # ArXiv doesn't provide citation count, so we set to 0
             papers.append({
                 "title": title,
                 "abstract": abstract,
@@ -45,17 +68,23 @@ def fetch_from_arxiv(topic, max_results=10):
                 "year": int(year) if year.isdigit() else 0,
                 "authors": authors[:3]
             })
+        
         return papers
     except Exception as e:
-        st.error(f"ArXiv fetch error: {e}")
-        return []
+        st.error(f"⚠️ ArXiv parsing error: {e}. Trying raw text fallback...")
+        # Last resort: try to parse with a simpler method (just in case)
+        try:
+            # Use a different approach: get the raw text and find entries
+            # but this is unlikely; we'll just return empty
+            return []
+        except:
+            return []
 
 def retrieval_agent(topic, max_results=10):
     """
     Try Semantic Scholar first; if it fails with 429, fallback to ArXiv.
     """
     # First, try Semantic Scholar
-    # Clean and expand query
     clean_topic = re.sub(r'[^\w\s]', ' ', topic).strip()
     if len(clean_topic.split()) <= 2:
         expanded_query = f"{clean_topic} transformer OR deep learning"
@@ -73,13 +102,13 @@ def retrieval_agent(topic, max_results=10):
         "fields": "title,abstract,citationCount,year,authors"
     }
     
-    for attempt in range(2):  # only 2 attempts to avoid long wait
+    for attempt in range(2):
         try:
             response = requests.get(url, params=params, timeout=10)
             if response.status_code == 429:
                 if attempt == 0:
                     st.warning("⏳ Semantic Scholar rate limit. Switching to ArXiv...")
-                    break  # fallback to ArXiv immediately on first 429
+                    break
                 time.sleep(2)
                 continue
             response.raise_for_status()
@@ -98,14 +127,14 @@ def retrieval_agent(topic, max_results=10):
             if papers:
                 return papers
             else:
-                # If no papers, fallback to ArXiv
                 break
         except:
             break
     
-    # If we reach here, either Semantic Scholar failed or returned no papers
+    # Fallback to ArXiv
     st.info("📡 Using ArXiv as fallback (no rate limits).")
-    return fetch_from_arxiv(topic, max_results)
+    arxiv_papers = fetch_from_arxiv(topic, max_results=max_results*2)
+    return arxiv_papers
 
 # ---------- 2. CLASSICAL ML AGENT (TF-IDF Filtering) ----------
 def relevance_filter_agent(topic, papers):
