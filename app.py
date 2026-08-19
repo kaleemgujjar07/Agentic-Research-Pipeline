@@ -1,4 +1,4 @@
-"""AutoResearch: Multi-Agent Research Pipeline (REAL Data Fetching + Rate Limit Handling)"""
+"""AutoResearch: Multi-Agent Research Pipeline (REAL Data Fetching + Smart Search)"""
 import streamlit as st
 import requests
 import json
@@ -9,26 +9,34 @@ from groq import Groq
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-# ---------- 1. REAL RETRIEVAL AGENT (Semantic Scholar API with retry & cleaning) ----------
+# ---------- 1. REAL RETRIEVAL AGENT (Semantic Scholar API with smart query) ----------
 def retrieval_agent(topic, max_results=10):
     """
     Fetch REAL papers from Semantic Scholar.
-    - Cleans query (removes punctuation, limits words)
+    - Smart query expansion for short/generic terms
     - Handles rate limits (429) with exponential backoff
-    - Returns list of papers with title, abstract, citations, year, authors
+    - Fallback search if first query fails
     """
-    # ----- CLEAN THE QUERY -----
-    # Remove punctuation and extra spaces
-    clean_topic = re.sub(r'[^\w\s]', ' ', topic)
-    clean_topic = ' '.join(clean_topic.split()[:6])  # Keep first 6 words max
+    # ----- CLEAN AND EXPAND THE QUERY -----
+    clean_topic = re.sub(r'[^\w\s]', ' ', topic).strip()
     
-    if len(clean_topic.split()) < 2:
-        clean_topic = topic  # fallback if too short
+    # If query is too short or generic, expand it
+    if len(clean_topic.split()) <= 2 or clean_topic.lower() in ["vision", "ai", "ml", "deep learning"]:
+        expanded_query = f"{clean_topic} transformer OR deep learning OR neural network"
+        st.info(f"🔍 Expanded your search to: '{expanded_query}'")
+        query_to_use = expanded_query
+    else:
+        query_to_use = clean_topic
+    
+    # Limit to 5 keywords max for API friendliness
+    query_words = query_to_use.split()
+    if len(query_words) > 5:
+        query_to_use = ' '.join(query_words[:5])
     
     url = "https://api.semanticscholar.org/graph/v1/paper/search"
     params = {
-        "query": clean_topic,
-        "limit": max_results,
+        "query": query_to_use,
+        "limit": min(max_results, 8),  # Request fewer papers to avoid rate limits
         "fields": "title,abstract,citationCount,year,authors"
     }
     
@@ -41,7 +49,7 @@ def retrieval_agent(topic, max_results=10):
                 wait_time = 5 * (attempt + 1)  # 5s, 10s, 15s
                 st.warning(f"⏳ Rate limit hit. Waiting {wait_time} seconds... (attempt {attempt+1}/3)")
                 time.sleep(wait_time)
-                continue  # retry
+                continue
                 
             response.raise_for_status()
             data = response.json()
@@ -58,16 +66,33 @@ def retrieval_agent(topic, max_results=10):
                     "authors": [a.get("name", "") for a in item.get("authors", [])[:3]]
                 })
             
+            # If no results, try fallback search
             if not papers:
-                st.info(f"🔍 No results found for '{clean_topic}'. Try broader terms like 'LLM reasoning'.")
+                st.info(f"🔍 No results for '{query_to_use}'. Trying broader search...")
+                # Fallback: remove quotes and search with just the main keywords
+                fallback_query = ' '.join(query_to_use.split()[:3])
+                if fallback_query and fallback_query != query_to_use:
+                    params["query"] = fallback_query
+                    response = requests.get(url, params=params, timeout=10)
+                    if response.status_code == 200:
+                        data = response.json()
+                        for item in data.get("data", []):
+                            if item.get("abstract"):
+                                papers.append({
+                                    "title": item.get("title", "No Title"),
+                                    "abstract": item.get("abstract", ""),
+                                    "citations": item.get("citationCount", 0),
+                                    "year": item.get("year", 0),
+                                    "authors": [a.get("name", "") for a in item.get("authors", [])[:3]]
+                                })
             
             return papers
             
         except requests.exceptions.RequestException as e:
-            if attempt == 2:  # last attempt
-                st.error(f"❌ Failed to fetch: {e}. Please wait 1 minute and try a shorter topic.")
+            if attempt == 2:
+                st.error(f"❌ Failed to fetch: {e}. Please try a different topic or wait 1 minute.")
                 return []
-            time.sleep(2)  # wait before next attempt
+            time.sleep(2)
 
 # ---------- 2. CLASSICAL ML AGENT (TF-IDF Filtering) ----------
 def relevance_filter_agent(topic, papers):
@@ -81,10 +106,7 @@ def relevance_filter_agent(topic, papers):
     vectorizer = TfidfVectorizer(stop_words="english", max_features=500)
     tfidf_matrix = vectorizer.fit_transform(documents)
     
-    # Similarity between topic (index 0) and each abstract
     similarities = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:]).flatten()
-    
-    # Sort papers by similarity (highest first)
     sorted_papers = sorted(zip(papers, similarities), key=lambda x: x[1], reverse=True)
     return [p[0] for p in sorted_papers]
 
@@ -96,7 +118,6 @@ def gap_analysis_agent(topic, papers, api_key):
         
     client = Groq(api_key=api_key)
     
-    # Prepare context (limit to top 5 to avoid token overflow)
     top_papers = papers[:5]
     abstracts_text = ""
     for i, p in enumerate(top_papers):
@@ -128,38 +149,33 @@ def gap_analysis_agent(topic, papers, api_key):
             raise ValueError("No gaps in response")
         return gaps
     except Exception as e:
-        st.warning(f"⚠️ LLM API issue ({e}). Using fallback gaps based on citations.")
-        # Fallback: generate gaps based on citation patterns (so it's never 100% dummy)
+        st.warning(f"⚠️ LLM API issue ({e}). Using fallback gaps.")
         if top_papers:
-            avg_cites = sum(p['citations'] for p in top_papers) // len(top_papers)
+            avg_cites = sum(p['citations'] for p in top_papers) // len(top_papers) if top_papers else 0
             return [
-                {"description": f"Highly cited papers (avg {avg_cites} cites) focus on specific datasets. Generalization remains a gap.", "impact_score": 8},
-                {"description": "Computational efficiency is rarely benchmarked across these papers, limiting real-world deployment.", "impact_score": 7},
-                {"description": "Cross-domain validation beyond the medical imaging domain is missing in the current literature.", "impact_score": 6}
+                {"description": f"Papers (avg {avg_cites} citations) lack standardized evaluation benchmarks across datasets.", "impact_score": 8},
+                {"description": "Reproducibility and open-source code availability are not consistently addressed.", "impact_score": 7},
+                {"description": "Limited exploration of computational efficiency and real-world deployment constraints.", "impact_score": 6}
             ]
         return [{"description": "Unable to analyze papers.", "impact_score": 0}]
 
 # ---------- 4. MAIN ORCHESTRATOR ----------
 def run_research_pipeline(topic, max_papers, api_key):
-    # Step A: Fetch REAL papers from the internet
     with st.spinner("📡 Fetching REAL papers from Semantic Scholar..."):
-        raw_papers = retrieval_agent(topic, max_papers * 2)  # Fetch extra to filter
+        raw_papers = retrieval_agent(topic, max_papers * 2)
     
     if not raw_papers:
         return [], [], [], 0, 0
     
-    # Step B: Classical ML Filtering (TF-IDF)
     with st.spinner("🧮 Filtering papers using TF-IDF similarity..."):
         filtered_papers = relevance_filter_agent(topic, raw_papers)[:max_papers]
     
     if not filtered_papers:
         return [], [], [], 0, 0
     
-    # Step C: LLM Gap Analysis
     with st.spinner("🧠 Analyzing gaps with Llama-3..."):
         gaps = gap_analysis_agent(topic, filtered_papers, api_key)
     
-    # Step D: Generate Hypotheses
     hypotheses = []
     for i, gap in enumerate(gaps[:2]):
         hypotheses.append({
@@ -180,17 +196,13 @@ st.set_page_config(page_title="AutoResearch", page_icon="🔬", layout="wide")
 st.title("🔬 AutoResearch: Multi-Agent Research Assistant")
 st.markdown("*Fetches REAL papers → TF-IDF Filtering → Llama-3 Gap Analysis*")
 
-# Sidebar for API Key – auto-populate from secrets if available
 with st.sidebar:
     st.header("🔑 Configuration")
-    
-    # Try to get API key from secrets first, otherwise ask user to type
     default_key = st.secrets.get("GROQ_API_KEY", "")
     api_key = st.text_input("Groq API Key", type="password", value=default_key if default_key else "",
-                           help="Get free key at console.groq.com. If you set GROQ_API_KEY in secrets, leave this blank.")
-    
+                           help="Get free key at console.groq.com. Leave blank if set in secrets.")
     if not api_key:
-        st.warning("Enter your Groq API key to use real AI gap detection.")
+        st.warning("Enter your Groq API key")
     st.markdown("---")
     st.caption("Pipeline: Retrieval Agent (Semantic Scholar) → Filter (TF-IDF) → Gap Analyzer (LLM)")
 
@@ -201,7 +213,7 @@ with st.form("research_form"):
 
 if submitted:
     if not api_key:
-        st.error("Please provide a Groq API key (either in sidebar or set GROQ_API_KEY in secrets).")
+        st.error("Please provide a Groq API key.")
     elif not topic or len(topic.strip()) < 3:
         st.error("Please enter a valid research topic (at least 3 characters).")
     else:
@@ -210,9 +222,9 @@ if submitted:
         )
         
         if not papers:
-            st.error("No real papers found for this topic. Try a broader search term.")
+            st.error("No papers found. Try a more specific topic like 'vision transformer medical image'")
         else:
-            st.success(f"✅ Pipeline complete! Analyzed {len(papers)} REAL papers from Semantic Scholar.")
+            st.success(f"✅ Pipeline complete! Analyzed {len(papers)} REAL papers.")
             
             col1, col2, col3 = st.columns(3)
             col1.metric("Real Papers Found", len(papers))
@@ -220,7 +232,7 @@ if submitted:
             col3.metric("Avg Citations", f"{avg_citations:.0f}")
             
             st.markdown("---")
-            st.header("📄 1. Real Papers Fetched (Filtered by TF-IDF Relevance)")
+            st.header("📄 1. Real Papers Fetched")
             for p in papers:
                 st.markdown(f"- **{p['title']}** ({p['year']}) - {p['citations']} citations")
                 st.caption(f"_{p['abstract'][:200]}..._")
