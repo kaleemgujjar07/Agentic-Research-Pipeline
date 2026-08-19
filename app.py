@@ -1,34 +1,67 @@
-"""AutoResearch: Multi-Agent Research Pipeline (REAL Data Fetching + Smart Search)"""
+"""AutoResearch: Multi-Agent Research Pipeline (Semantic Scholar + ArXiv Fallback)"""
 import streamlit as st
 import requests
 import json
 import random
 import time
 import re
+import xml.etree.ElementTree as ET
 from groq import Groq
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-# ---------- 1. REAL RETRIEVAL AGENT (Semantic Scholar API with smart query) ----------
+# ---------- 1. REAL RETRIEVAL AGENT (Semantic Scholar + ArXiv fallback) ----------
+def fetch_from_arxiv(topic, max_results=10):
+    """Fetch papers from ArXiv API (no rate limit)."""
+    # Clean query for ArXiv: replace spaces with +, remove special chars
+    query = re.sub(r'[^\w\s]', ' ', topic).strip()
+    query = '+'.join(query.split())
+    
+    url = f"http://export.arxiv.org/api/query?search_query=all:{query}&start=0&max_results={max_results}"
+    
+    try:
+        response = requests.get(url, timeout=10)
+        if response.status_code != 200:
+            return []
+        
+        # Parse XML
+        root = ET.fromstring(response.content)
+        ns = {'arxiv': 'http://arxiv.org/schemas/atom'}
+        papers = []
+        
+        for entry in root.findall('arxiv:entry', ns):
+            title = entry.find('arxiv:title', ns).text.strip() if entry.find('arxiv:title', ns) is not None else "No Title"
+            abstract = entry.find('arxiv:summary', ns).text.strip() if entry.find('arxiv:summary', ns) is not None else ""
+            # Get year from published date
+            published = entry.find('arxiv:published', ns).text if entry.find('arxiv:published', ns) is not None else ""
+            year = published[:4] if published else "0"
+            # ArXiv doesn't provide citation count, set to 0
+            authors = [a.text for a in entry.findall('arxiv:author/arxiv:name', ns)]
+            
+            papers.append({
+                "title": title,
+                "abstract": abstract,
+                "citations": 0,
+                "year": int(year) if year.isdigit() else 0,
+                "authors": authors[:3]
+            })
+        return papers
+    except Exception as e:
+        st.error(f"ArXiv fetch error: {e}")
+        return []
+
 def retrieval_agent(topic, max_results=10):
     """
-    Fetch REAL papers from Semantic Scholar.
-    - Smart query expansion for short/generic terms
-    - Handles rate limits (429) with exponential backoff
-    - Fallback search if first query fails
+    Try Semantic Scholar first; if it fails with 429, fallback to ArXiv.
     """
-    # ----- CLEAN AND EXPAND THE QUERY -----
+    # First, try Semantic Scholar
+    # Clean and expand query
     clean_topic = re.sub(r'[^\w\s]', ' ', topic).strip()
-    
-    # If query is too short or generic, expand it
-    if len(clean_topic.split()) <= 2 or clean_topic.lower() in ["vision", "ai", "ml", "deep learning"]:
-        expanded_query = f"{clean_topic} transformer OR deep learning OR neural network"
-        st.info(f"🔍 Expanded your search to: '{expanded_query}'")
+    if len(clean_topic.split()) <= 2:
+        expanded_query = f"{clean_topic} transformer OR deep learning"
         query_to_use = expanded_query
     else:
         query_to_use = clean_topic
-    
-    # Limit to 5 keywords max for API friendliness
     query_words = query_to_use.split()
     if len(query_words) > 5:
         query_to_use = ' '.join(query_words[:5])
@@ -36,25 +69,22 @@ def retrieval_agent(topic, max_results=10):
     url = "https://api.semanticscholar.org/graph/v1/paper/search"
     params = {
         "query": query_to_use,
-        "limit": min(max_results, 8),  # Request fewer papers to avoid rate limits
+        "limit": min(max_results, 8),
         "fields": "title,abstract,citationCount,year,authors"
     }
     
-    # ----- RETRY LOGIC FOR RATE LIMITS (429) -----
-    for attempt in range(3):
+    for attempt in range(2):  # only 2 attempts to avoid long wait
         try:
             response = requests.get(url, params=params, timeout=10)
-            
             if response.status_code == 429:
-                wait_time = 5 * (attempt + 1)  # 5s, 10s, 15s
-                st.warning(f"⏳ Rate limit hit. Waiting {wait_time} seconds... (attempt {attempt+1}/3)")
-                time.sleep(wait_time)
+                if attempt == 0:
+                    st.warning("⏳ Semantic Scholar rate limit. Switching to ArXiv...")
+                    break  # fallback to ArXiv immediately on first 429
+                time.sleep(2)
                 continue
-                
             response.raise_for_status()
             data = response.json()
             papers = []
-            
             for item in data.get("data", []):
                 if not item.get("abstract"):
                     continue
@@ -65,64 +95,39 @@ def retrieval_agent(topic, max_results=10):
                     "year": item.get("year", 0),
                     "authors": [a.get("name", "") for a in item.get("authors", [])[:3]]
                 })
-            
-            # If no results, try fallback search
-            if not papers:
-                st.info(f"🔍 No results for '{query_to_use}'. Trying broader search...")
-                # Fallback: remove quotes and search with just the main keywords
-                fallback_query = ' '.join(query_to_use.split()[:3])
-                if fallback_query and fallback_query != query_to_use:
-                    params["query"] = fallback_query
-                    response = requests.get(url, params=params, timeout=10)
-                    if response.status_code == 200:
-                        data = response.json()
-                        for item in data.get("data", []):
-                            if item.get("abstract"):
-                                papers.append({
-                                    "title": item.get("title", "No Title"),
-                                    "abstract": item.get("abstract", ""),
-                                    "citations": item.get("citationCount", 0),
-                                    "year": item.get("year", 0),
-                                    "authors": [a.get("name", "") for a in item.get("authors", [])[:3]]
-                                })
-            
-            return papers
-            
-        except requests.exceptions.RequestException as e:
-            if attempt == 2:
-                st.error(f"❌ Failed to fetch: {e}. Please try a different topic or wait 1 minute.")
-                return []
-            time.sleep(2)
+            if papers:
+                return papers
+            else:
+                # If no papers, fallback to ArXiv
+                break
+        except:
+            break
+    
+    # If we reach here, either Semantic Scholar failed or returned no papers
+    st.info("📡 Using ArXiv as fallback (no rate limits).")
+    return fetch_from_arxiv(topic, max_results)
 
 # ---------- 2. CLASSICAL ML AGENT (TF-IDF Filtering) ----------
 def relevance_filter_agent(topic, papers):
-    """Use TF-IDF + Cosine Similarity to rank REAL papers by relevance."""
     if not papers:
         return []
-        
     abstracts = [p["abstract"] for p in papers]
     documents = [topic] + abstracts
-    
     vectorizer = TfidfVectorizer(stop_words="english", max_features=500)
     tfidf_matrix = vectorizer.fit_transform(documents)
-    
     similarities = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:]).flatten()
     sorted_papers = sorted(zip(papers, similarities), key=lambda x: x[1], reverse=True)
     return [p[0] for p in sorted_papers]
 
 # ---------- 3. LLM AGENT (Groq API for Gap Detection) ----------
 def gap_analysis_agent(topic, papers, api_key):
-    """Send REAL abstracts to Llama-3 and force structured JSON gaps."""
     if not papers:
-        return [{"description": "No papers retrieved to analyze.", "impact_score": 0}]
-        
+        return [{"description": "No papers to analyze.", "impact_score": 0}]
     client = Groq(api_key=api_key)
-    
     top_papers = papers[:5]
     abstracts_text = ""
     for i, p in enumerate(top_papers):
         abstracts_text += f"Paper {i+1}: {p['title']}\nAbstract: {p['abstract'][:500]}...\n\n"
-    
     prompt = f"""
     You are a critical AI research analyst. 
     I fetched {len(top_papers)} REAL papers on the topic: "{topic}".
@@ -135,7 +140,6 @@ def gap_analysis_agent(topic, papers, api_key):
     Each object must have keys: "description" (string) and "impact_score" (integer 1-10).
     Do not output any other text except the JSON.
     """
-    
     try:
         response = client.chat.completions.create(
             model="llama3-70b-8192",
@@ -146,55 +150,46 @@ def gap_analysis_agent(topic, papers, api_key):
         result = json.loads(response.choices[0].message.content)
         gaps = result.get("gaps", [])
         if not gaps:
-            raise ValueError("No gaps in response")
+            raise ValueError("No gaps")
         return gaps
     except Exception as e:
-        st.warning(f"⚠️ LLM API issue ({e}). Using fallback gaps.")
+        st.warning(f"⚠️ LLM issue ({e}). Using fallback gaps.")
         if top_papers:
             avg_cites = sum(p['citations'] for p in top_papers) // len(top_papers) if top_papers else 0
             return [
-                {"description": f"Papers (avg {avg_cites} citations) lack standardized evaluation benchmarks across datasets.", "impact_score": 8},
-                {"description": "Reproducibility and open-source code availability are not consistently addressed.", "impact_score": 7},
-                {"description": "Limited exploration of computational efficiency and real-world deployment constraints.", "impact_score": 6}
+                {"description": f"Papers (avg {avg_cites} citations) lack standardized benchmarks.", "impact_score": 8},
+                {"description": "Reproducibility and open-source code not consistently addressed.", "impact_score": 7},
+                {"description": "Limited exploration of computational efficiency in real deployments.", "impact_score": 6}
             ]
         return [{"description": "Unable to analyze papers.", "impact_score": 0}]
 
 # ---------- 4. MAIN ORCHESTRATOR ----------
 def run_research_pipeline(topic, max_papers, api_key):
-    with st.spinner("📡 Fetching REAL papers from Semantic Scholar..."):
+    with st.spinner("📡 Fetching REAL papers (Semantic Scholar → ArXiv fallback)..."):
         raw_papers = retrieval_agent(topic, max_papers * 2)
-    
     if not raw_papers:
         return [], [], [], 0, 0
-    
-    with st.spinner("🧮 Filtering papers using TF-IDF similarity..."):
+    with st.spinner("🧮 Filtering papers using TF-IDF..."):
         filtered_papers = relevance_filter_agent(topic, raw_papers)[:max_papers]
-    
     if not filtered_papers:
         return [], [], [], 0, 0
-    
     with st.spinner("🧠 Analyzing gaps with Llama-3..."):
         gaps = gap_analysis_agent(topic, filtered_papers, api_key)
-    
     hypotheses = []
-    for i, gap in enumerate(gaps[:2]):
+    for gap in gaps[:2]:
         hypotheses.append({
             "hypothesis": f"Exploring {gap['description'][:60]}... using a hybrid architecture could bridge this gap",
             "confidence": round(random.uniform(0.65, 0.85), 2),
             "feasibility": "High" if gap.get("impact_score", 0) > 7 else "Medium"
         })
-    
     total_citations = sum(p["citations"] for p in filtered_papers)
     avg_citations = total_citations / len(filtered_papers) if filtered_papers else 0
-    
     return filtered_papers, gaps, hypotheses, total_citations, avg_citations
-
 
 # ---------- STREAMLIT UI ----------
 st.set_page_config(page_title="AutoResearch", page_icon="🔬", layout="wide")
-
 st.title("🔬 AutoResearch: Multi-Agent Research Assistant")
-st.markdown("*Fetches REAL papers → TF-IDF Filtering → Llama-3 Gap Analysis*")
+st.markdown("*Fetches REAL papers (Semantic Scholar + ArXiv) → TF‑IDF Filtering → Llama‑3 Gap Analysis*")
 
 with st.sidebar:
     st.header("🔑 Configuration")
@@ -204,7 +199,7 @@ with st.sidebar:
     if not api_key:
         st.warning("Enter your Groq API key")
     st.markdown("---")
-    st.caption("Pipeline: Retrieval Agent (Semantic Scholar) → Filter (TF-IDF) → Gap Analyzer (LLM)")
+    st.caption("Pipeline: Retrieval (Semantic Scholar/ArXiv) → Filter (TF-IDF) → LLM Gap Analyzer")
 
 with st.form("research_form"):
     topic = st.text_input("Research Topic", placeholder="e.g., Vision Transformers for Medical Imaging")
@@ -215,35 +210,29 @@ if submitted:
     if not api_key:
         st.error("Please provide a Groq API key.")
     elif not topic or len(topic.strip()) < 3:
-        st.error("Please enter a valid research topic (at least 3 characters).")
+        st.error("Enter a valid research topic (≥3 characters).")
     else:
         papers, gaps, hypotheses, total_citations, avg_citations = run_research_pipeline(
             topic, max_papers, api_key
         )
-        
         if not papers:
-            st.error("No papers found. Try a more specific topic like 'vision transformer medical image'")
+            st.error("No papers found. Try a more specific topic (e.g., 'vision transformer medical image').")
         else:
             st.success(f"✅ Pipeline complete! Analyzed {len(papers)} REAL papers.")
-            
             col1, col2, col3 = st.columns(3)
             col1.metric("Real Papers Found", len(papers))
             col2.metric("Gaps Detected", len(gaps))
             col3.metric("Avg Citations", f"{avg_citations:.0f}")
-            
             st.markdown("---")
             st.header("📄 1. Real Papers Fetched")
             for p in papers:
                 st.markdown(f"- **{p['title']}** ({p['year']}) - {p['citations']} citations")
                 st.caption(f"_{p['abstract'][:200]}..._")
-            
             st.markdown("---")
             st.header(f"🧠 2. AI-Generated Research Gaps")
             for i, g in enumerate(gaps, 1):
-                score = g.get("impact_score", "N/A")
-                st.markdown(f"**Gap {i}** (Impact: {score}/10)")
+                st.markdown(f"**Gap {i}** (Impact: {g.get('impact_score', 'N/A')}/10)")
                 st.markdown(f"> {g['description']}")
-            
             st.markdown("---")
             st.header("💡 3. Generated Hypotheses")
             for h in hypotheses:
