@@ -1,4 +1,4 @@
-"""AutoResearch: Multi-Agent Research Pipeline (WORKING - Mixtral Model)"""
+"""AutoResearch: Multi-Agent Research Pipeline (WORKING - Llama 3.2 90B)"""
 import streamlit as st
 import requests
 import json
@@ -9,6 +9,10 @@ import xml.etree.ElementTree as ET
 from groq import Groq
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+
+# ---------- CONFIGURATION ----------
+# ✅ CURRENTLY SUPPORTED GROQ MODEL
+GROQ_MODEL = "llama-3.2-90b-vision-preview"
 
 # ---------- 1. RETRIEVAL AGENT ----------
 def fetch_from_arxiv(topic, max_results=15):
@@ -108,7 +112,7 @@ def relevance_filter_agent(topic, papers):
     sorted_papers = sorted(zip(papers, similarities), key=lambda x: x[1], reverse=True)
     return [p[0] for p in sorted_papers]
 
-# ---------- 3. GAP ANALYSIS AGENT (MIXTRAL) ----------
+# ---------- 3. GAP ANALYSIS AGENT ----------
 def gap_analysis_agent(topic, papers, api_key):
     if not papers:
         return [{"description": "No papers to analyze.", "impact_score": 0}]
@@ -131,7 +135,7 @@ def gap_analysis_agent(topic, papers, api_key):
     """
     try:
         response = client.chat.completions.create(
-            model="mixtral-8x7b-32768",  # ✅ WORKING
+            model=GROQ_MODEL,  # ✅ Using working model
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7,
             response_format={"type": "json_object"}
@@ -149,7 +153,7 @@ def gap_analysis_agent(topic, papers, api_key):
             {"description": "Limited exploration of real-world deployment constraints.", "impact_score": 6}
         ]
 
-# ---------- 4. CODE GENERATION AGENT (MIXTRAL) ----------
+# ---------- 4. CODE GENERATION AGENT ----------
 def code_generation_agent(topic, papers, gaps, api_key):
     if not papers or not gaps:
         return "# Insufficient data to generate code."
@@ -177,7 +181,7 @@ def code_generation_agent(topic, papers, gaps, api_key):
     """
     try:
         response = client.chat.completions.create(
-            model="mixtral-8x7b-32768",  # ✅ WORKING
+            model=GROQ_MODEL,  # ✅ Using working model
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
         )
@@ -197,9 +201,9 @@ def run_research_pipeline(topic, max_papers, api_key):
         filtered_papers = relevance_filter_agent(topic, raw_papers)[:max_papers]
     if not filtered_papers:
         return [], [], [], "", 0, 0
-    with st.spinner("🧠 Analyzing gaps with Mixtral..."):
+    with st.spinner("🧠 Analyzing gaps with Llama 3.2 90B..."):
         gaps = gap_analysis_agent(topic, filtered_papers, api_key)
-    with st.spinner("💻 Generating PyTorch code with Mixtral..."):
+    with st.spinner("💻 Generating PyTorch code with Llama 3.2 90B..."):
         generated_code = code_generation_agent(topic, filtered_papers, gaps, api_key)
     hypotheses = []
     for gap in gaps[:2]:
@@ -215,7 +219,7 @@ def run_research_pipeline(topic, max_papers, api_key):
 # ---------- STREAMLIT UI ----------
 st.set_page_config(page_title="AutoResearch", page_icon="🔬", layout="wide")
 st.title("🔬 AutoResearch: Multi-Agent Research Assistant")
-st.markdown("*Fetches REAL papers → TF‑IDF Filtering → Mixtral Gap Analysis → PyTorch Code Generation*")
+st.markdown("*Fetches REAL papers → TF‑IDF Filtering → Llama 3.2 90B Gap Analysis → PyTorch Code Generation*")
 
 with st.sidebar:
     st.header("🔑 Configuration")
