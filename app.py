@@ -1,4 +1,4 @@
-"""AutoResearch: Multi-Agent Research Pipeline (WORKING - Llama 3.3 70B)"""
+"""AutoResearch: Multi-Agent Research Pipeline (WORKING - Llama 3.1 8B Instant)"""
 import streamlit as st
 import requests
 import json
@@ -11,8 +11,8 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
 # ---------- CONFIGURATION ----------
-# ✅ CURRENTLY SUPPORTED GROQ MODEL (as of August 2026)
-GROQ_MODEL = "llama-3.3-70b-instruct"
+# ✅ DEFINITELY WORKING MODEL (as of August 2026)
+GROQ_MODEL = "llama-3.1-8b-instant"
 
 # ---------- 1. RETRIEVAL AGENT ----------
 def fetch_from_arxiv(topic, max_results=15):
@@ -201,9 +201,9 @@ def run_research_pipeline(topic, max_papers, api_key):
         filtered_papers = relevance_filter_agent(topic, raw_papers)[:max_papers]
     if not filtered_papers:
         return [], [], [], "", 0, 0
-    with st.spinner("🧠 Analyzing gaps with Llama 3.3 70B..."):
+    with st.spinner("🧠 Analyzing gaps with Llama 3.1 8B..."):
         gaps = gap_analysis_agent(topic, filtered_papers, api_key)
-    with st.spinner("💻 Generating PyTorch code with Llama 3.3 70B..."):
+    with st.spinner("💻 Generating PyTorch code with Llama 3.1 8B..."):
         generated_code = code_generation_agent(topic, filtered_papers, gaps, api_key)
     hypotheses = []
     for gap in gaps[:2]:
@@ -219,7 +219,7 @@ def run_research_pipeline(topic, max_papers, api_key):
 # ---------- STREAMLIT UI ----------
 st.set_page_config(page_title="AutoResearch", page_icon="🔬", layout="wide")
 st.title("🔬 AutoResearch: Multi-Agent Research Assistant")
-st.markdown("*Fetches REAL papers → TF‑IDF Filtering → Llama 3.3 70B Gap Analysis → PyTorch Code Generation*")
+st.markdown("*Fetches REAL papers → TF‑IDF Filtering → Llama 3.1 8B Gap Analysis → PyTorch Code Generation*")
 
 with st.sidebar:
     st.header("🔑 Configuration")
