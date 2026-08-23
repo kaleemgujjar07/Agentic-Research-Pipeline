@@ -1,4 +1,4 @@
-"""AutoResearch: Multi-Agent Research Pipeline (FINAL - Hugging Face)"""
+"""AutoResearch: Multi-Agent Research Pipeline (FINAL - Groq with Auto Model)"""
 import streamlit as st
 import requests
 import json
@@ -6,40 +6,35 @@ import random
 import time
 import re
 import xml.etree.ElementTree as ET
+from groq import Groq
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
 # ---------- CONFIGURATION ----------
-# Hugging Face models (FREE)
-GAP_MODEL = "google/flan-t5-large"           # For gap analysis
-CODE_MODEL = "bigcode/starcoder"             # For code generation (faster than CodeLlama)
+# We'll fetch the model dynamically
 
-# ---------- 1. HUGGING FACE API CALLS ----------
-def call_huggingface(model, prompt, api_token, max_length=512):
-    """Call Hugging Face Inference API."""
-    url = f"https://api-inference.huggingface.co/models/{model}"
-    headers = {"Authorization": f"Bearer {api_token}"}
-    payload = {
-        "inputs": prompt,
-        "parameters": {
-            "max_length": max_length,
-            "temperature": 0.7,
-            "return_full_text": False
-        }
-    }
+# ---------- 1. GROQ MODEL FETCHER ----------
+def get_available_models(api_key):
+    """Fetch available models from Groq and return a list of model IDs."""
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=30)
-        if response.status_code == 200:
-            result = response.json()
-            if isinstance(result, list) and len(result) > 0:
-                return result[0].get("generated_text", "")
-            return ""
-        else:
-            st.warning(f"⚠️ API error: {response.status_code}")
-            return ""
+        client = Groq(api_key=api_key)
+        models = client.models.list()
+        # Filter for instruct/chat models (exclude embedding, etc.)
+        available = []
+        for m in models.data:
+            model_id = m.id
+            # Prefer instruct models
+            if "instruct" in model_id or "chat" in model_id or "preview" in model_id:
+                available.append(model_id)
+            # Also include any llama models
+            elif "llama" in model_id.lower():
+                available.append(model_id)
+        # Sort by likely performance (larger numbers first)
+        available.sort(key=lambda x: (x.count('-'), -len(x)))
+        return available
     except Exception as e:
-        st.warning(f"⚠️ API error: {e}")
-        return ""
+        st.error(f"Could not fetch models: {e}")
+        return []
 
 # ---------- 2. RETRIEVAL AGENT ----------
 def fetch_from_arxiv(topic, max_results=15):
@@ -138,69 +133,87 @@ def relevance_filter_agent(topic, papers):
     sorted_papers = sorted(zip(papers, similarities), key=lambda x: x[1], reverse=True)
     return [p[0] for p in sorted_papers]
 
-# ---------- 4. GAP ANALYSIS AGENT (FLAN-T5) ----------
-def gap_analysis_agent(topic, papers, api_token):
+# ---------- 4. GAP ANALYSIS AGENT (Groq) ----------
+def gap_analysis_agent(topic, papers, api_key, model):
     if not papers:
         return [{"description": "No papers to analyze.", "impact_score": 0}]
-    top_papers = papers[:3]
+    client = Groq(api_key=api_key)
+    top_papers = papers[:5]
     abstracts_text = ""
     for i, p in enumerate(top_papers):
-        abstracts_text += f"Paper {i+1}: {p['title']}\n{p['abstract'][:300]}\n\n"
-    prompt = f"""Based on these abstracts about {topic}, list 3 research gaps.
-Abstracts:
-{abstracts_text}
-Research gaps:
-1."""
-    result = call_huggingface(GAP_MODEL, prompt, api_token, max_length=200)
-    if result:
-        gaps_text = result.strip().split('\n')
-        gaps = []
-        for i, line in enumerate(gaps_text[:3]):
-            if line.strip():
-                clean_line = re.sub(r'^[\d\s\.]+', '', line.strip())
-                gaps.append({
-                    "description": clean_line,
-                    "impact_score": 8 - i
-                })
-        if gaps:
-            return gaps
-    # Fallback
-    return [
-        {"description": f"Lack of standardized benchmarks for {topic[:30]}... research.", "impact_score": 8},
-        {"description": "Reproducibility and open-source code not consistently addressed.", "impact_score": 7},
-        {"description": "Limited exploration of real-world deployment constraints.", "impact_score": 6}
-    ]
+        abstracts_text += f"Paper {i+1}: {p['title']}\nAbstract: {p['abstract'][:500]}...\n\n"
+    prompt = f"""
+    You are a critical AI research analyst.
+    I fetched {len(top_papers)} REAL papers on the topic: "{topic}".
+    Here are their abstracts:
+    ---
+    {abstracts_text}
+    ---
+    Based ONLY on these abstracts, identify exactly 3 specific research gaps.
+    Return your answer STRICTLY as a JSON object with a key "gaps" that maps to a list of objects. 
+    Each object must have keys: "description" (string) and "impact_score" (integer 1-10).
+    Do not output any other text except the JSON.
+    """
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+            response_format={"type": "json_object"}
+        )
+        result = json.loads(response.choices[0].message.content)
+        gaps = result.get("gaps", [])
+        if not gaps:
+            raise ValueError("No gaps")
+        return gaps
+    except Exception as e:
+        st.warning(f"⚠️ Using fallback gaps ({e})")
+        return [
+            {"description": f"Lack of standardized benchmarks for {topic[:30]}... research.", "impact_score": 8},
+            {"description": "Reproducibility and open-source code not consistently addressed.", "impact_score": 7},
+            {"description": "Limited exploration of real-world deployment constraints.", "impact_score": 6}
+        ]
 
-# ---------- 5. CODE GENERATION AGENT (StarCoder) ----------
-def code_generation_agent(topic, papers, gaps, api_token):
+# ---------- 5. CODE GENERATION AGENT (Groq) ----------
+def code_generation_agent(topic, papers, gaps, api_key, model):
     if not papers or not gaps:
         return "# Insufficient data to generate code."
     top_paper = papers[0]
     paper_title = top_paper['title']
-    paper_abstract = top_paper['abstract'][:500]
+    paper_abstract = top_paper['abstract'][:800]
     main_gap = gaps[0]['description'] if gaps else "general improvement"
-    prompt = f"""Write PyTorch code for a model.
-Paper: {paper_title}
-Abstract: {paper_abstract}
-Gap to solve: {main_gap}
+    client = Groq(api_key=api_key)
+    prompt = f"""
+    You are an expert PyTorch engineer. Based on the following research paper abstract and the identified research gap, write a complete, runnable Python script.
 
-Code:
-import torch
-import torch.nn as nn
+    Paper Title: {paper_title}
+    Abstract: {paper_abstract}
 
-class ImprovedModel(nn.Module):
-    def __init__(self):
-        super().__init__()
-"""
-    result = call_huggingface(CODE_MODEL, prompt, api_token, max_length=500)
-    if result:
-        code = "import torch\nimport torch.nn as nn\n\nclass ImprovedModel(nn.Module):\n    def __init__(self):\n        super().__init__()" + result
+    Research Gap to Solve: {main_gap}
+
+    Instructions:
+    1. Write a self-contained Python script.
+    2. Import torch, torch.nn, and torch.optim.
+    3. Define a class named `ImprovedModel` that inherits `nn.Module`.
+    4. Implement a basic forward pass.
+    5. Include a `train_model()` function that loops for 2 epochs.
+    6. Use comments to explain the architecture.
+    7. Output ONLY the Python code. No explanations outside the code.
+    """
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+        )
+        code = response.choices[0].message.content
         code = code.replace("```python", "").replace("```", "").strip()
         return code
-    return "# Code generation failed. Please try again."
+    except Exception as e:
+        return f"# Code generation failed: {e}"
 
 # ---------- 6. MAIN ORCHESTRATOR ----------
-def run_research_pipeline(topic, max_papers, api_token):
+def run_research_pipeline(topic, max_papers, api_key, model):
     with st.spinner("📡 Fetching REAL papers..."):
         raw_papers = retrieval_agent(topic, max_papers * 2)
     if not raw_papers:
@@ -209,10 +222,10 @@ def run_research_pipeline(topic, max_papers, api_token):
         filtered_papers = relevance_filter_agent(topic, raw_papers)[:max_papers]
     if not filtered_papers:
         return [], [], [], "", 0, 0
-    with st.spinner("🧠 Analyzing gaps with FLAN-T5..."):
-        gaps = gap_analysis_agent(topic, filtered_papers, api_token)
-    with st.spinner("💻 Generating PyTorch code with StarCoder..."):
-        generated_code = code_generation_agent(topic, filtered_papers, gaps, api_token)
+    with st.spinner(f"🧠 Analyzing gaps with {model}..."):
+        gaps = gap_analysis_agent(topic, filtered_papers, api_key, model)
+    with st.spinner(f"💻 Generating PyTorch code with {model}..."):
+        generated_code = code_generation_agent(topic, filtered_papers, gaps, api_key, model)
     hypotheses = []
     for gap in gaps[:2]:
         hypotheses.append({
@@ -227,16 +240,24 @@ def run_research_pipeline(topic, max_papers, api_token):
 # ---------- STREAMLIT UI ----------
 st.set_page_config(page_title="AutoResearch", page_icon="🔬", layout="wide")
 st.title("🔬 AutoResearch: Multi-Agent Research Assistant")
-st.markdown("*Fetches REAL papers → TF‑IDF Filtering → FLAN‑T5 Gap Analysis → StarCoder Code Generation*")
+st.markdown("*Fetches REAL papers → TF‑IDF Filtering → Groq LLM Gap Analysis → Groq Code Generation*")
 
 with st.sidebar:
     st.header("🔑 Configuration")
-    # Try to get token from secrets first, fallback to manual input
-    default_token = st.secrets.get("HF_TOKEN", "")
-    hf_token = st.text_input("Hugging Face Token", type="password", value=default_token if default_token else "",
-                           help="Get a free token at huggingface.co/settings/tokens")
-    if not hf_token:
-        st.warning("Enter your Hugging Face token")
+    default_key = st.secrets.get("GROQ_API_KEY", "")
+    api_key = st.text_input("Groq API Key", type="password", value=default_key if default_key else "",
+                           help="Get a free key at console.groq.com")
+    if not api_key:
+        st.warning("Enter your Groq API key")
+    else:
+        # Fetch available models
+        with st.spinner("Fetching available models..."):
+            models = get_available_models(api_key)
+        if models:
+            selected_model = st.selectbox("Choose a model", models, index=0)
+        else:
+            st.error("Could not fetch models. Please check your API key.")
+            selected_model = ""
     st.markdown("---")
     st.caption("4 Agents: Retrieval → Filter (TF-IDF) → Gap Analyzer → Code Generator")
     st.markdown("---")
@@ -251,13 +272,15 @@ with st.form("research_form"):
     submitted = st.form_submit_button("🚀 Run Research Pipeline")
 
 if submitted:
-    if not hf_token:
-        st.error("Please provide a Hugging Face token.")
+    if not api_key:
+        st.error("Please provide a Groq API key.")
+    elif not selected_model:
+        st.error("Please select a valid model.")
     elif not topic or len(topic.strip()) < 3:
         st.error("Enter a valid research topic (≥3 characters).")
     else:
         papers, gaps, hypotheses, generated_code, total_citations, avg_citations = run_research_pipeline(
-            topic, max_papers, hf_token
+            topic, max_papers, api_key, selected_model
         )
         if not papers:
             st.error("No papers found. Try a broader topic.")
