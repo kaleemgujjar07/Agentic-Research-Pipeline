@@ -1,4 +1,4 @@
-"""AutoResearch: Multi-Agent Research Pipeline (FINAL - Groq with Auto Model)"""
+"""AutoResearch: Multi-Agent Research Pipeline (WORKING - Groq)"""
 import streamlit as st
 import requests
 import json
@@ -11,32 +11,10 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
 # ---------- CONFIGURATION ----------
-# We'll fetch the model dynamically
+# ✅ This model is ALWAYS available on Groq (free tier)
+GROQ_MODEL = "llama-3.1-8b-instant"
 
-# ---------- 1. GROQ MODEL FETCHER ----------
-def get_available_models(api_key):
-    """Fetch available models from Groq and return a list of model IDs."""
-    try:
-        client = Groq(api_key=api_key)
-        models = client.models.list()
-        # Filter for instruct/chat models (exclude embedding, etc.)
-        available = []
-        for m in models.data:
-            model_id = m.id
-            # Prefer instruct models
-            if "instruct" in model_id or "chat" in model_id or "preview" in model_id:
-                available.append(model_id)
-            # Also include any llama models
-            elif "llama" in model_id.lower():
-                available.append(model_id)
-        # Sort by likely performance (larger numbers first)
-        available.sort(key=lambda x: (x.count('-'), -len(x)))
-        return available
-    except Exception as e:
-        st.error(f"Could not fetch models: {e}")
-        return []
-
-# ---------- 2. RETRIEVAL AGENT ----------
+# ---------- 1. RETRIEVAL AGENT ----------
 def fetch_from_arxiv(topic, max_results=15):
     clean_topic = re.sub(r'[^\w\s]', ' ', topic).strip()
     if len(clean_topic.split()) <= 2:
@@ -44,6 +22,7 @@ def fetch_from_arxiv(topic, max_results=15):
     query = '+'.join(clean_topic.split())
     categories = "cat:cs.CV OR cat:cs.AI OR cat:cs.LG OR cat:cs.CL"
     url = f"http://export.arxiv.org/api/query?search_query=all:{query}+AND+({categories})&start=0&max_results={max_results}"
+    
     try:
         response = requests.get(url, timeout=15)
         if response.status_code != 200:
@@ -121,7 +100,7 @@ def retrieval_agent(topic, max_results=10):
         papers = fetch_from_arxiv(simpler, max_results=max_results*2)
     return papers
 
-# ---------- 3. TF-IDF FILTERING ----------
+# ---------- 2. TF-IDF FILTERING ----------
 def relevance_filter_agent(topic, papers):
     if not papers:
         return []
@@ -133,8 +112,8 @@ def relevance_filter_agent(topic, papers):
     sorted_papers = sorted(zip(papers, similarities), key=lambda x: x[1], reverse=True)
     return [p[0] for p in sorted_papers]
 
-# ---------- 4. GAP ANALYSIS AGENT (Groq) ----------
-def gap_analysis_agent(topic, papers, api_key, model):
+# ---------- 3. GAP ANALYSIS AGENT ----------
+def gap_analysis_agent(topic, papers, api_key):
     if not papers:
         return [{"description": "No papers to analyze.", "impact_score": 0}]
     client = Groq(api_key=api_key)
@@ -156,7 +135,7 @@ def gap_analysis_agent(topic, papers, api_key, model):
     """
     try:
         response = client.chat.completions.create(
-            model=model,
+            model=GROQ_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7,
             response_format={"type": "json_object"}
@@ -174,8 +153,8 @@ def gap_analysis_agent(topic, papers, api_key, model):
             {"description": "Limited exploration of real-world deployment constraints.", "impact_score": 6}
         ]
 
-# ---------- 5. CODE GENERATION AGENT (Groq) ----------
-def code_generation_agent(topic, papers, gaps, api_key, model):
+# ---------- 4. CODE GENERATION AGENT ----------
+def code_generation_agent(topic, papers, gaps, api_key):
     if not papers or not gaps:
         return "# Insufficient data to generate code."
     top_paper = papers[0]
@@ -202,7 +181,7 @@ def code_generation_agent(topic, papers, gaps, api_key, model):
     """
     try:
         response = client.chat.completions.create(
-            model=model,
+            model=GROQ_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
         )
@@ -212,8 +191,8 @@ def code_generation_agent(topic, papers, gaps, api_key, model):
     except Exception as e:
         return f"# Code generation failed: {e}"
 
-# ---------- 6. MAIN ORCHESTRATOR ----------
-def run_research_pipeline(topic, max_papers, api_key, model):
+# ---------- 5. MAIN ORCHESTRATOR ----------
+def run_research_pipeline(topic, max_papers, api_key):
     with st.spinner("📡 Fetching REAL papers..."):
         raw_papers = retrieval_agent(topic, max_papers * 2)
     if not raw_papers:
@@ -222,10 +201,10 @@ def run_research_pipeline(topic, max_papers, api_key, model):
         filtered_papers = relevance_filter_agent(topic, raw_papers)[:max_papers]
     if not filtered_papers:
         return [], [], [], "", 0, 0
-    with st.spinner(f"🧠 Analyzing gaps with {model}..."):
-        gaps = gap_analysis_agent(topic, filtered_papers, api_key, model)
-    with st.spinner(f"💻 Generating PyTorch code with {model}..."):
-        generated_code = code_generation_agent(topic, filtered_papers, gaps, api_key, model)
+    with st.spinner("🧠 Analyzing gaps..."):
+        gaps = gap_analysis_agent(topic, filtered_papers, api_key)
+    with st.spinner("💻 Generating PyTorch code..."):
+        generated_code = code_generation_agent(topic, filtered_papers, gaps, api_key)
     hypotheses = []
     for gap in gaps[:2]:
         hypotheses.append({
@@ -240,24 +219,29 @@ def run_research_pipeline(topic, max_papers, api_key, model):
 # ---------- STREAMLIT UI ----------
 st.set_page_config(page_title="AutoResearch", page_icon="🔬", layout="wide")
 st.title("🔬 AutoResearch: Multi-Agent Research Assistant")
-st.markdown("*Fetches REAL papers → TF‑IDF Filtering → Groq LLM Gap Analysis → Groq Code Generation*")
+st.markdown("*Fetches REAL papers → TF‑IDF Filtering → Groq LLM Gap Analysis → PyTorch Code Generation*")
 
 with st.sidebar:
     st.header("🔑 Configuration")
+    
+    # Get API key: try secrets first, then allow manual input
     default_key = st.secrets.get("GROQ_API_KEY", "")
-    api_key = st.text_input("Groq API Key", type="password", value=default_key if default_key else "",
-                           help="Get a free key at console.groq.com")
+    api_key = st.text_input(
+        "Groq API Key", 
+        type="password", 
+        value=default_key if default_key else "",
+        help="Get a free key at console.groq.com. If you set GROQ_API_KEY in secrets, leave this blank."
+    )
+    
+    # If no key is entered but we have it in secrets, use secrets
+    if not api_key and default_key:
+        api_key = default_key
+    
     if not api_key:
-        st.warning("Enter your Groq API key")
+        st.warning("⚠️ Enter your Groq API key")
     else:
-        # Fetch available models
-        with st.spinner("Fetching available models..."):
-            models = get_available_models(api_key)
-        if models:
-            selected_model = st.selectbox("Choose a model", models, index=0)
-        else:
-            st.error("Could not fetch models. Please check your API key.")
-            selected_model = ""
+        st.success("✅ API key loaded")
+    
     st.markdown("---")
     st.caption("4 Agents: Retrieval → Filter (TF-IDF) → Gap Analyzer → Code Generator")
     st.markdown("---")
@@ -273,14 +257,12 @@ with st.form("research_form"):
 
 if submitted:
     if not api_key:
-        st.error("Please provide a Groq API key.")
-    elif not selected_model:
-        st.error("Please select a valid model.")
+        st.error("❌ Please provide a Groq API key (either in sidebar or set GROQ_API_KEY in secrets).")
     elif not topic or len(topic.strip()) < 3:
-        st.error("Enter a valid research topic (≥3 characters).")
+        st.error("❌ Enter a valid research topic (≥3 characters).")
     else:
         papers, gaps, hypotheses, generated_code, total_citations, avg_citations = run_research_pipeline(
-            topic, max_papers, api_key, selected_model
+            topic, max_papers, api_key
         )
         if not papers:
             st.error("No papers found. Try a broader topic.")
