@@ -1,4 +1,4 @@
-"""AutoResearch: Multi-Agent Research Pipeline (CLOUD VERSION - 100% Working)"""
+"""AutoResearch: Multi-Agent Research Pipeline (CLOUD VERSION - FIXED)"""
 import streamlit as st
 import requests
 import re
@@ -80,7 +80,7 @@ def fetch_semantic_scholar(topic, max_results=10):
     try:
         response = requests.get(url, params=params, timeout=10)
         if response.status_code == 429:
-            return None  # Rate limit, trigger fallback
+            return None
         if response.status_code != 200:
             return None
         
@@ -149,19 +149,15 @@ def fetch_arxiv_papers(topic, max_results=10):
 
 def retrieval_agent(topic, max_results=10):
     """Agent 1: Retrieves papers autonomously (Semantic Scholar → ArXiv fallback)."""
-    # Try Semantic Scholar first
     papers = fetch_semantic_scholar(topic, max_results * 2)
     
     if papers is None:
-        # Semantic Scholar failed (rate limit or error)
         st.info("📡 Semantic Scholar rate limit. Using ArXiv as fallback.")
         papers = fetch_arxiv_papers(topic, max_results * 2)
     elif papers == []:
-        # No papers found in Semantic Scholar
         st.info("📡 No Semantic Scholar results, trying ArXiv...")
         papers = fetch_arxiv_papers(topic, max_results * 2)
     
-    # If still no papers, try broader search
     if not papers:
         simpler = ' '.join(topic.split()[:3])
         if simpler != topic:
@@ -192,7 +188,6 @@ def detect_gaps(topic, papers):
     abstracts_text = " ".join([p["abstract"] for p in papers])
     gaps = []
     
-    # Gap 1: Limitations mentioned?
     limitation_keywords = ["limitation", "challenge", "future work", "unsolved", "requires", "limited", "struggles"]
     found = [kw for kw in limitation_keywords if kw in abstracts_text.lower()]
     if found:
@@ -206,7 +201,6 @@ def detect_gaps(topic, papers):
             "impact_score": 7
         })
     
-    # Gap 2: Dataset/benchmark issues?
     if "dataset" in abstracts_text.lower() or "benchmark" in abstracts_text.lower():
         gaps.append({
             "description": "Existing methods are evaluated on limited datasets. Cross-dataset generalization remains underexplored.",
@@ -218,7 +212,6 @@ def detect_gaps(topic, papers):
             "impact_score": 8
         })
     
-    # Gap 3: Efficiency/deployment?
     if "efficiency" in abstracts_text.lower() or "computational" in abstracts_text.lower():
         gaps.append({
             "description": "Computational efficiency is mentioned but not thoroughly benchmarked against lightweight alternatives.",
@@ -232,7 +225,7 @@ def detect_gaps(topic, papers):
     
     return gaps
 
-# ---------- 5. CODE GENERATOR AGENT ----------
+# ---------- 5. CODE GENERATOR AGENT (FIXED) ----------
 def generate_code(topic, papers, gaps):
     """Agent 4: Generates PyTorch code based on the gap."""
     if not papers or not gaps:
@@ -241,7 +234,8 @@ def generate_code(topic, papers, gaps):
     top_paper = papers[0]
     gap_desc = gaps[0]["description"] if gaps else "general improvement"
     
-    code_template = '''
+    # Using raw string to avoid escape issues
+    code_template = r'''
 """
 Auto-generated PyTorch code for: {title}
 Research gap: {gap}
@@ -250,7 +244,6 @@ Research gap: {gap}
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset
 
 class ImprovedModel(nn.Module):
     """
@@ -260,14 +253,14 @@ class ImprovedModel(nn.Module):
     def __init__(self, in_channels=3, num_classes=10):
         super(ImprovedModel, self).__init__()
         
-        # Convolutional stem
+        # Convolutional layers
         self.conv1 = nn.Conv2d(in_channels, 64, kernel_size=3, padding=1)
         self.bn1 = nn.BatchNorm2d(64)
         self.conv2 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
         self.bn2 = nn.BatchNorm2d(128)
         self.pool = nn.MaxPool2d(2)
         
-        # Adaptive pooling to handle variable input sizes
+        # Adaptive pooling
         self.adaptive_pool = nn.AdaptiveAvgPool2d((8, 8))
         
         # Fully connected layers
@@ -302,7 +295,7 @@ def train_model(model, train_loader, epochs=10, lr=0.001):
             optimizer.step()
             running_loss += loss.item()
         
-        print(f"Epoch {{epoch+1}}/{epochs}, Loss: {{running_loss/len(train_loader):.4f}}")
+        print(f"Epoch {epoch+1}/{epochs}, Loss: {running_loss/len(train_loader):.4f}")
     
     return model
 
@@ -313,39 +306,35 @@ if __name__ == "__main__":
     # Create dummy data for testing
     dummy_data = torch.randn(4, 3, 224, 224)
     output = model(dummy_data)
-    print(f"Output shape: {{output.shape}}")
-    
-    # Example training setup
-    # train_loader = DataLoader(your_dataset, batch_size=32, shuffle=True)
-    # model = train_model(model, train_loader, epochs=10)
+    print(f"Output shape: {output.shape}")
 '''
-    return code_template.format(title=top_paper["title"], gap=gap_desc[:80])
+    
+    try:
+        return code_template.format(title=top_paper["title"], gap=gap_desc[:80])
+    except KeyError as e:
+        # Fallback: simple replacement
+        return code_template.replace("{title}", top_paper["title"]).replace("{gap}", gap_desc[:80])
 
 # ---------- 6. ORCHESTRATOR ----------
 def run_pipeline(topic, max_papers):
     """Orchestrator: Coordinates all 4 agents."""
     
-    # Agent 1: Retrieval
     with st.spinner("🔄 Agent 1: Retrieval Agent working..."):
         raw = retrieval_agent(topic, max_papers * 2)
     if not raw:
         return [], [], [], "", 0, 0
     
-    # Agent 2: Filtering
     with st.spinner("🔄 Agent 2: Filter Agent working (TF-IDF)..."):
         filtered = relevance_filter(topic, raw)[:max_papers]
     if not filtered:
         return [], [], [], "", 0, 0
     
-    # Agent 3: Gap Detection
     with st.spinner("🔄 Agent 3: Gap Detector working..."):
         gaps = detect_gaps(topic, filtered)
     
-    # Agent 4: Code Generation
     with st.spinner("🔄 Agent 4: Code Generator working..."):
         code = generate_code(topic, filtered, gaps)
     
-    # Generate hypotheses
     hypotheses = []
     for gap in gaps[:2]:
         hypotheses.append({
@@ -360,7 +349,6 @@ def run_pipeline(topic, max_papers):
 
 # ---------- 7. UI ----------
 st.set_page_config(page_title="AutoResearch", page_icon="🔬", layout="wide")
-
 st.title("🔬 AutoResearch: Multi-Agent Research Assistant")
 st.markdown("*4 Autonomous Agents: Retrieval → TF‑IDF Filtering → Gap Detection → Code Generation*")
 
@@ -420,7 +408,6 @@ if submitted:
             st.header("📜 4. Generated PyTorch Code")
             st.code(code, language="python")
             
-            # Download buttons
             col1, col2 = st.columns(2)
             with col1:
                 if code and not code.startswith("# Code generation failed"):
