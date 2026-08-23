@@ -5,6 +5,8 @@ import re
 import xml.etree.ElementTree as ET
 import random
 import time
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 # ---------- 1. REAL ARXIV RETRIEVAL ----------
 def fetch_arxiv_papers(topic, max_results=10):
@@ -40,7 +42,7 @@ def fetch_arxiv_papers(topic, max_results=10):
             papers.append({
                 "title": title,
                 "abstract": abstract,
-                "citations": 0,  # ArXiv doesn't provide citations
+                "citations": 0,
                 "year": int(year) if year.isdigit() else 0,
                 "authors": authors[:3],
                 "category": category
@@ -50,10 +52,7 @@ def fetch_arxiv_papers(topic, max_results=10):
         st.error(f"ArXiv fetch error: {e}")
         return []
 
-# ---------- 2. TF-IDF FILTERING (Classical ML) ----------
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-
+# ---------- 2. TF-IDF FILTERING ----------
 def relevance_filter(topic, papers):
     if not papers:
         return []
@@ -65,7 +64,7 @@ def relevance_filter(topic, papers):
     sorted_papers = sorted(zip(papers, similarities), key=lambda x: x[1], reverse=True)
     return [p[0] for p in sorted_papers]
 
-# ---------- 3. RULE-BASED GAP DETECTION (No LLM) ----------
+# ---------- 3. RULE-BASED GAP DETECTION ----------
 def detect_gaps(topic, papers):
     """Detect research gaps using rules (no API needed)."""
     if not papers:
@@ -115,18 +114,20 @@ def detect_gaps(topic, papers):
     
     return gaps
 
-# ---------- 4. CODE GENERATION (Template-based) ----------
+# ---------- 4. CODE GENERATION (No nested f-strings) ----------
 def generate_code(topic, papers, gaps):
-    """Generate PyTorch code based on gaps."""
+    """Generate PyTorch code based on gaps (template with .format())."""
     if not papers or not gaps:
         return "# Insufficient data."
     
     top_paper = papers[0]
     gap_desc = gaps[0]["description"] if gaps else "general improvement"
     
-    code = f'''"""
-Auto-generated PyTorch code for: {top_paper["title"]}
-Research gap: {gap_desc[:60]}...
+    # Use a regular string with .format() to avoid nested f-string issues
+    code_template = '''
+"""
+Auto-generated PyTorch code for: {title}
+Research gap: {gap}
 """
 
 import torch
@@ -159,7 +160,7 @@ def train_model(model, train_loader, epochs=10):
     optimizer = optim.Adam(model.parameters(), lr=0.001)
     for epoch in range(epochs):
         model.train()
-        loss_sum = 0
+        loss_sum = 0.0
         for data, target in train_loader:
             optimizer.zero_grad()
             output = model(data)
@@ -167,14 +168,16 @@ def train_model(model, train_loader, epochs=10):
             loss.backward()
             optimizer.step()
             loss_sum += loss.item()
-        print(f"Epoch {epoch+1}: Loss = {loss_sum/len(train_loader):.4f}")
+        print(f"Epoch {{epoch+1}}: Loss = {{loss_sum/len(train_loader):.4f}}")
     return model
 
 if __name__ == "__main__":
     model = ImprovedModel()
     dummy = torch.randn(4, 3, 224, 224)
-    print(f"Output shape: {model(dummy).shape}")
+    print(f"Output shape: {{model(dummy).shape}}")
 '''
+    # Format the template with the actual values
+    code = code_template.format(title=top_paper["title"], gap=gap_desc[:80])
     return code
 
 # ---------- 5. ORCHESTRATOR ----------
