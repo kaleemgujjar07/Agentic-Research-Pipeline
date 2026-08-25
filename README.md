@@ -87,7 +87,6 @@ agentic-research-pipeline/
 ```
 
 
-## 🔗 Links
+## 🔗 Link
 
 - **Live Demo**: [Streamlit App](https://agentic-research-pipeline-vt8dv8hpisclw4axfknqhm.streamlit.app/)
-- **GitHub**: [Repository](https://github.com/kaelemgujjar07/agentic-research-pipeline)
