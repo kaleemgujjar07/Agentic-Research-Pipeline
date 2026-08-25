@@ -27,15 +27,6 @@ The system has **4 autonomous agents** managed by an orchestrator:
 
 ---
 
-## 🔄 Two Versions
-
-| Branch | Brain | Deployment |
-|--------|-------|------------|
-| `main` | Rule-based | ✅ Streamlit Cloud |
-| `local-llm` | Ollama (Llama 3.2) | ❌ Local only |
-
----
-
 ## 🛠️ Technology Stack
 
 | Layer | Technology |
@@ -43,7 +34,6 @@ The system has **4 autonomous agents** managed by an orchestrator:
 | Frontend | Streamlit |
 | Language | Python 3.11+ |
 | Classical ML | Scikit-learn (TF-IDF) |
-| LLM (Local) | Ollama (Llama 3.2 3B) |
 | Data Sources | ArXiv API, Semantic Scholar API |
 | PDF Export | FPDF |
 
@@ -60,24 +50,6 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-### Option 2: Local LLM Version
-
-```bash
-git checkout local-llm
-
-# Install Ollama
-curl -fsSL https://ollama.com/install.sh | sh   # Mac/Linux
-# Or download from https://ollama.com (Windows)
-
-ollama pull llama3.2:3b
-ollama serve
-
-# In new terminal:
-pip install -r requirements.txt
-streamlit run app.py
-```
-
----
 
 ## 📊 Output Example
 
