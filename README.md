@@ -1,129 +1,121 @@
-# AutoResearch v3.0: Unified Multi-Agent Research System
+# 🔬 AutoResearch: Multi-Agent Research Pipeline
 
-**A production-grade, modular research assistant with specialized capabilities for security, computer vision, data science, and IoT domains.**
+## Final Year Project - BS Computer Science
 
-## 🎯 Why This Project Is Different
 
-Unlike typical FYP projects (dashboards, chatbots, management systems), AutoResearch is a **research infrastructure system** that demonstrates:
-- Multi-agent architecture design
-- Real academic API integration (arXiv, Semantic Scholar, PubMed)
-- Security-hardened input processing
-- Computer vision for document analysis
-- Statistical analysis and forecasting
-- Distributed systems messaging
+## 📖 Project Overview
 
-## 🏗️ Architecture
+**AutoResearch** is a multi-agent research assistant that autonomously performs:
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                     AUTORESEARCH v3.0                          │
-├─────────────────────────────────────────────────────────────────┤
-│  SECURITY MODULE          │  VISION MODULE                     │
-│  • Input sanitization     │  • PDF figure extraction           │
-│  • Rate limiting          │  • Chart type detection            │
-│  • Adversarial testing    │  • Network graph generation        │
-│  • Sandboxed PDF parsing  │  • Trend visualization data        │
-├─────────────────────────────────────────────────────────────────┤
-│  DATA SCIENCE MODULE      │  IOT MODULE                        │
-│  • Citation impact metrics│  • Distributed agent messaging     │
-│  • Trend forecasting      │  • Heartbeat monitoring            │
-│  • Statistical gap tests  │  • Edge deployment mode            │
-│  • Research health scores │  • Lightweight operation           │
-├─────────────────────────────────────────────────────────────────┤
-│                     CORE PIPELINE (7 Agents)                    │
-├─────────────────────────────────────────────────────────────────┤
-│  1. Literature Discovery → arXiv + Semantic Scholar + PubMed   │
-│  2. Deep Reading → Methodology, claims, limitations extraction │
-│  3. Citation Network → Graph building, clustering, bridges     │
-│  4. Gap Detection → 5 gap types with statistical scoring       │
-│  5. Hypothesis Generation → Testable hypotheses from gaps      │
-│  6. Critic/Verification → Filters against existing literature  │
-│  7. Report Generator → Structured, citable output              │
-├─────────────────────────────────────────────────────────────────┤
-│                     INTERFACES                                  │
-├─────────────────────────────────────────────────────────────────┤
-│  • FastAPI REST API        • Interactive HTML Dashboard         │
-│  • Real-time status updates • JSON/Markdown export              │
-└─────────────────────────────────────────────────────────────────┘
-```
+1. **Paper Retrieval** – Fetches real papers from ArXiv and Semantic Scholar
+2. **Relevance Filtering** – Ranks papers using TF-IDF (Classical ML)
+3. **Gap Detection** – Identifies research gaps using rules or LLM
+4. **Code Generation** – Writes executable PyTorch code
 
-## 🚀 Quick Start
+---
+
+## 🧠 Agentic Architecture
+
+The system has **4 autonomous agents** managed by an orchestrator:
+
+| Agent | Function | Decision-Making |
+|-------|----------|-----------------|
+| **1. Retrieval** | Fetches papers from ArXiv/Semantic Scholar | Autonomously selects API (Semantic Scholar → ArXiv fallback) |
+| **2. Filter** | Ranks papers by relevance | Uses TF-IDF + Cosine Similarity |
+| **3. Gap Detector** | Analyzes abstracts, finds gaps | Rule-based OR LLM (Ollama) |
+| **4. Code Generator** | Writes PyTorch code | Template-based OR LLM (Ollama) |
+
+---
+
+## 🔄 Two Versions
+
+| Branch | Brain | Deployment |
+|--------|-------|------------|
+| `main` | Rule-based | ✅ Streamlit Cloud |
+| `local-llm` | Ollama (Llama 3.2) | ❌ Local only |
+
+---
+
+## 🛠️ Technology Stack
+
+| Layer | Technology |
+|-------|------------|
+| Frontend | Streamlit |
+| Language | Python 3.11+ |
+| Classical ML | Scikit-learn (TF-IDF) |
+| LLM (Local) | Ollama (Llama 3.2 3B) |
+| Data Sources | ArXiv API, Semantic Scholar API |
+| PDF Export | FPDF |
+
+---
+
+## 📦 Installation
+
+### Option 1: Cloud Version
 
 ```bash
-# Install dependencies
+git clone https://github.com/kaelemgujjar07/agentic-research-pipeline.git
+cd agentic-research-pipeline
 pip install -r requirements.txt
-
-# Run the API with dashboard
-python -m autoresearch.api.main
-
-# Or run from Python
-from autoresearch.core.orchestrator import AutoResearchOrchestratorV3
-o = AutoResearchOrchestratorV3(mode="full")
-result = o.run("transformer architectures for medical imaging", max_papers=10)
-print(result["markdown_report"])
+streamlit run app.py
 ```
 
-## 📊 Dashboard
+### Option 2: Local LLM Version
 
-Visit `http://localhost:8000/` to see the interactive dashboard showing:
-- Real-time pipeline status
-- Security module results
-- Data science metrics (citation impact, health score)
-- Vision module outputs (network graphs)
-- IoT agent health monitoring
+```bash
+git checkout local-llm
 
-## 🔒 Security Features
+# Install Ollama
+curl -fsSL https://ollama.com/install.sh | sh   # Mac/Linux
+# Or download from https://ollama.com (Windows)
 
-- **Input Sanitization**: Detects SQL injection, XSS, path traversal, entropy-based garbage detection
-- **Rate Limiting**: Per-client request throttling
-- **Adversarial Testing**: Automated test suite against 7 attack vectors
-- **Sandboxed PDF Parsing**: File size limits, extension validation, hash verification
+ollama pull llama3.2:3b
+ollama serve
 
-## 👁️ Computer Vision Features
+# In new terminal:
+pip install -r requirements.txt
+streamlit run app.py
+```
 
-- **Figure Extraction**: Extracts images and captions from academic PDFs
-- **Chart Detection**: Classifies charts as line, bar, pie, or scatter using OpenCV
-- **Network Visualization**: Generates D3.js-compatible graph data for citation networks
-- **Trend Charts**: Time-series visualization data for publication trends
+---
 
-## 📈 Data Science Features
+## 📊 Output Example
 
-- **Citation Impact Metrics**: H-index, mean/median citations, velocity trends
-- **Trend Forecasting**: Linear regression-based publication forecasting
-- **Statistical Gap Testing**: Significance testing for detected research gaps
-- **Research Health Score**: Composite score based on diversity, limitations, and recency
+### Papers Retrieved
+- Transformers in Medical Imaging: A Survey (2022) - 2847 citations
+- UNETR: Transformers for 3D Medical Image Segmentation (2022) - 1892 citations
 
-## 📡 IoT Features
+### Research Gaps Detected
+1. Papers mention limitations: limitation, challenge. Addressing these could improve methods.
+2. Existing methods evaluated on limited datasets. Cross-dataset generalization remains underexplored.
+3. Computational efficiency is mentioned but not thoroughly benchmarked.
 
-- **Distributed Messaging**: MQTT-style pub/sub between agents
-- **Heartbeat Monitoring**: Agent health tracking with automatic failure detection
-- **Edge Mode**: Lightweight deployment for resource-constrained devices
-- **Message Logging**: Complete audit trail of inter-agent communication
+### Generated Code
+```python
+import torch
+import torch.nn as nn
+import torch.optim as optim
 
-## 🛠️ Tech Stack
+class ImprovedModel(nn.Module):
+    def __init__(self, in_channels=3, num_classes=10):
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_channels, 64, kernel_size=3, padding=1)
+        # ... complete PyTorch code generated
+```
 
-- **Python 3.8+**
-- **FastAPI** for REST API
-- **SQLAlchemy** for database
-- **OpenCV + PIL** for vision
-- **PyMuPDF + pdfplumber** for PDF parsing
-- **Requests** for academic APIs
+---
 
 ## 📁 Project Structure
 
 ```
-autoresearch/
-├── agents/              # 7 core research agents
-├── modules/             # 4 specialized modules
-│   ├── security.py      # Cybersecurity features
-│   ├── vision.py        # Computer vision features
-│   ├── datascience.py   # Data science features
-│   └── iot.py           # IoT/distributed features
-├── core/                # Orchestrator
-├── api/                 # FastAPI + Dashboard
-└── tests/               # Unit and integration tests
+agentic-research-pipeline/
+├── app.py                 # Main application
+├── requirements.txt       # Dependencies
+├── README.md             # This file
 ```
 
-## 📄 License
 
-MIT License — Built for research and educational purposes.
+## 🔗 Links
+
+- **Live Demo**: [Streamlit App](https://agentic-research-pipeline-vt8dv8hpisclw4axfknqhm.streamlit.app/)
+- **GitHub**: [Repository](https://github.com/kaelemgujjar07/agentic-research-pipeline)
