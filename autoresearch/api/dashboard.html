@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AutoResearch v3 - Dashboard</title>
+<style>
+  :root { --bg:#0f172a; --card:#1e293b; --line:#334155; --text:#e2e8f0; --mute:#94a3b8; --acc:#3b82f6; --ok:#34d399; --warn:#f59e0b; --bad:#ef4444; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:'Segoe UI',system-ui,sans-serif; background:var(--bg); color:var(--text); }
+  .header { background:linear-gradient(135deg,#1e3a8a,#3b82f6); padding:1.6rem 1rem; text-align:center; }
+  .header h1 { font-size:clamp(1.5rem,4vw,2.3rem); margin-bottom:.4rem; }
+  .header p { color:#bfdbfe; }
+  .container { max-width:1200px; margin:0 auto; padding:1.2rem 1rem 3rem; }
+  .card { background:var(--card); border-radius:12px; padding:1.2rem; border:1px solid var(--line); margin-top:1.2rem; }
+  .card h3 { color:#60a5fa; margin-bottom:.8rem; font-size:1.1rem; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:1rem; }
+  .metric { display:flex; justify-content:space-between; gap:1rem; padding:.45rem 0; border-bottom:1px solid var(--line); }
+  .metric:last-child { border-bottom:none; }
+  .metric span:first-child { color:var(--mute); } .metric span:last-child { color:var(--ok); font-weight:700; }
+  input[type=text] { width:100%; padding:.8rem; border-radius:8px; border:1px solid #475569; background:var(--bg); color:#fff; font-size:1rem; }
+  button { background:var(--acc); color:#fff; padding:.6rem 1rem; border:none; border-radius:8px; cursor:pointer; font-size:.95rem; }
+  button:hover:not(:disabled) { background:#2563eb; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  button.ghost { background:transparent; border:1px solid #475569; color:var(--text); }
+  button.ghost:hover:not(:disabled) { background:#334155; }
+  .row { display:flex; gap:.6rem; flex-wrap:wrap; align-items:center; margin-top:.7rem; }
+  .row > input[type=text] { flex:1 1 200px; width:auto; }
+  pre { background:var(--bg); padding:1rem; border-radius:8px; overflow-x:auto; font-size:.82rem; white-space:pre-wrap; }
+  .mute { color:var(--mute); font-size:.88rem; }
+  .err { color:var(--bad); margin-top:.6rem; }
+  /* explorer */
+  .ex-layout { display:grid; grid-template-columns:minmax(0,3fr) minmax(0,2fr); gap:1.2rem; }
+  @media (max-width:860px) { .ex-layout { grid-template-columns:1fr; } }
+  #map { width:100%; height:auto; background:var(--bg); border-radius:10px; border:1px solid var(--line); touch-action:none; cursor:crosshair; display:block; }
+  .legend { display:flex; flex-wrap:wrap; gap:.4rem .9rem; margin-top:.6rem; font-size:.82rem; color:var(--mute); }
+  .legend i { display:inline-block; width:.8rem; height:.8rem; vertical-align:-1px; margin-right:.3rem; }
+  .stat-row { display:flex; gap:1.2rem; flex-wrap:wrap; margin-bottom:.8rem; }
+  .stat b { display:block; font-size:1.4rem; color:var(--ok); } .stat span { color:var(--mute); font-size:.8rem; }
+  .preview { background:#1e3a5f; border-radius:8px; padding:.7rem .9rem; margin-top:.7rem; font-size:.9rem; }
+  details { border:1px solid var(--line); border-radius:8px; padding:.5rem .8rem; margin-top:.5rem; }
+  summary { cursor:pointer; }
+  details ul { margin:.5rem 0 .2rem 1.1rem; } details li { margin:.45rem 0; font-size:.9rem; }
+  details li small { color:var(--mute); display:block; }
+  select { width:100%; padding:.6rem; border-radius:8px; background:var(--bg); color:var(--text); border:1px solid #475569; }
+  input[type=range] { width:100%; }
+  a { color:#7dd3fc; }
+  .tip { position:fixed; pointer-events:none; max-width:320px; background:#020617; border:1px solid #475569; border-radius:8px; padding:.5rem .7rem; font-size:.8rem; z-index:10; display:none; }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>AutoResearch v3.0</h1>
+  <p>7-agent research pipeline &bull; interactive human-AI gap explorer</p>
+</div>
+
+<div class="container">
+  <div class="card">
+    <h3>Start research</h3>
+    <input type="text" id="topic" placeholder="e.g. transformer architectures for medical image segmentation" maxlength="300">
+    <div class="row"><button id="runBtn">Run 7-agent pipeline</button><span id="loading" class="mute" style="display:none">Running... this can take 30-60 seconds</span></div>
+    <div id="runErr" class="err"></div>
+  </div>
+
+  <div id="results"></div>
+
+  <!-- ===================== Gap Explorer ===================== -->
+  <div class="card" id="explorer" style="display:none">
+    <h3>Gap Explorer: organise the detected gaps together with the AI</h3>
+    <p class="mute">The AI proposes groups. Draw a loop around dots to select them, then group them under your own name. Gaps you group are never moved by the AI. Drag the slider to preview a re-clustering before applying it.</p>
+    <div class="stat-row" id="exStats"></div>
+    <div class="ex-layout">
+      <div>
+        <svg id="map" viewBox="0 0 640 440" role="img" aria-label="Map of research gaps"></svg>
+        <div class="legend" id="legend"></div>
+        <div class="mute" id="selInfo" style="margin-top:.6rem">0 selected</div>
+        <div class="row">
+          <input type="text" id="groupName" placeholder="Name for your group, e.g. Data scarcity" maxlength="80">
+          <button id="btnGroup">Group selected</button>
+        </div>
+        <div class="row">
+          <button class="ghost" id="btnStar">Star / unstar</button>
+          <button class="ghost" id="btnUnpin">Return to AI</button>
+          <button class="ghost" id="btnRemove">Remove</button>
+          <button class="ghost" id="btnClear">Clear selection</button>
+        </div>
+        <div id="exErr" class="err"></div>
+      </div>
+      <div>
+        <h4 style="margin-bottom:.4rem">Ask the AI to re-organise</h4>
+        <label class="mute" for="kRange">Number of AI clusters: <b id="kVal"></b></label>
+        <input type="range" id="kRange" min="1" max="8" value="4">
+        <div class="preview" id="kPreview"></div>
+        <div class="row"><button id="btnApply">Apply AI re-clustering</button></div>
+        <details id="movesBox" style="display:none"><summary>See what would move</summary><ul id="moves"></ul></details>
+
+        <h4 style="margin:1.1rem 0 .4rem">Rename an AI cluster</h4>
+        <select id="renameSel" aria-label="AI cluster to rename"></select>
+        <div class="row"><input type="text" id="renameTxt" placeholder="New name (empty resets)" maxlength="80"><button class="ghost" id="btnRename">Rename</button></div>
+
+        <div class="row" id="restoreRow" style="display:none"><button class="ghost" id="btnRestore"></button></div>
+        <details style="margin-top:.8rem"><summary>What you and the AI have done</summary><ul id="history"></ul></details>
+        <div class="row" style="margin-top:.8rem">
+          <a id="dlMap" download><button class="ghost" type="button">Download gap map (.md)</button></a>
+          <a id="dlReport" download><button class="ghost" type="button">Download full report (.md)</button></a>
+        </div>
+      </div>
+    </div>
+    <h4 style="margin:1.2rem 0 .3rem">Your gap map, grouped</h4>
+    <div id="groupList"></div>
+  </div>
+
+  <div class="grid" id="modules" style="display:none; margin-top:1.2rem">
+    <div class="card"><h3>Security</h3><div id="security-content"></div></div>
+    <div class="card"><h3>Data science</h3><div id="ds-content"></div></div>
+    <div class="card"><h3>Vision</h3><div id="vision-content"></div></div>
+    <div class="card"><h3>IoT (simulated)</h3><div id="iot-content"></div></div>
+  </div>
+</div>
+<div class="tip" id="tip"></div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const safeUrl = (u) => (/^https?:\/\//i.test(u || "") ? u : "");
+const metric = (l, v) => `<div class="metric"><span>${esc(l)}</span><span>${esc(v)}</span></div>`;
+const PALETTE = ["#60a5fa", "#fb923c", "#34d399", "#c084fc", "#f472b6", "#facc15", "#22d3ee", "#a3a3a3"];
+
+let ex = null;            // current explorer view from the server
+let sel = new Set();      // selected gap ids
+let previewTimer = null;
+
+// ------------------------------------------------------------------ API helper
+async function api(path, body) {
+  const opt = body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
+  const r = await fetch(path, opt);
+  let data = null;
+  try { data = await r.json(); } catch (_) { /* not json */ }
+  if (!r.ok) {
+    const d = data && data.detail;
+    throw new Error(typeof d === "string" ? d : Array.isArray(d) ? d.map((x) => x.msg).join("; ") : "Request failed (" + r.status + ")");
+  }
+  return data;
+}
+
+// ------------------------------------------------------------------ pipeline run
+$("runBtn").addEventListener("click", runResearch);
+$("topic").addEventListener("keydown", (e) => { if (e.key === "Enter") runResearch(); });
+
+async function runResearch() {
+  const topic = $("topic").value.trim();
+  if (topic.length < 3) { $("runErr").textContent = "Please enter a topic (at least 3 characters)."; return; }
+  $("runErr").textContent = ""; $("loading").style.display = "inline"; $("runBtn").disabled = true;
+  try {
+    const data = await api("/api/research", { topic, max_papers: 8 });
+    showResults(data);
+  } catch (e) { $("runErr").textContent = e.message; }
+  finally { $("loading").style.display = "none"; $("runBtn").disabled = false; }
+}
+
+function showResults(data) {
+  $("modules").style.display = "grid";
+  const sec = data.security || {}, ds = data.datascience || {}, health = ds.research_health || {}, cm = ds.citation_metrics || {};
+  const viz = data.vision || {}, nv = viz.network_visualization || {}, iot = data.iot || {}, hh = iot.agent_health || {};
+  $("security-content").innerHTML = metric("Input safe", !sec.input_sanitized) + metric("Entropy", sec.entropy ?? "N/A") + metric("Findings", (sec.findings || []).length);
+  $("ds-content").innerHTML = metric("Health score", (health.health_score || 0) + "/100") + metric("Mean citations", cm.mean_citations || 0) + metric("H-index", cm.h_index || 0) + metric("Trend", (ds.trend_forecast || {}).trend || "N/A");
+  $("vision-content").innerHTML = metric("Network nodes", nv.num_nodes || 0) + metric("Network links", nv.num_links || 0) + metric("Chart", (viz.trend_chart || {}).chart_type || "N/A");
+  $("iot-content").innerHTML = metric("Healthy agents", (hh.healthy_agents || []).length + "/7") + metric("Mode", (iot.deployment_mode || {}).mode || "N/A") + metric("Messages", (iot.message_log || []).length);
+  const st = data.pipeline_stats || {};
+  $("results").innerHTML = `<div class="card"><h3>Pipeline results</h3>` +
+    metric("Time", (st.total_time_seconds ?? "?") + "s") + metric("Papers", st.papers_found) + metric("Gaps detected", st.gaps_detected) +
+    metric("Hypotheses verified", st.hypotheses_verified) + `</div>` +
+    `<div class="card"><h3>Report preview</h3><pre>${esc((data.markdown_report || "").substring(0, 1500))}...</pre></div>`;
+  const g = data.gap_explorer || {};
+  if (g.session_id) { sel = new Set(); loadExplorer(g); $("explorer").style.display = "block"; }
+  else { $("explorer").style.display = "none"; }
+}
+
+// ------------------------------------------------------------------ explorer rendering
+const W = 640, H = 440, PAD = 34;
+const px = (x) => PAD + x * (W - 2 * PAD);
+const py = (y) => PAD + (1 - y) * (H - 2 * PAD);
+const SVGNS = "http://www.w3.org/2000/svg";
+function colorMap() {
+  const names = [...new Set(ex.items.map((i) => i.group))].sort();
+  return Object.fromEntries(names.map((n, i) => [n, PALETTE[i % PALETTE.length]]));
+}
+function el(name, attrs) { const e = document.createElementNS(SVGNS, name); for (const k in attrs) e.setAttribute(k, attrs[k]); return e; }
+
+function loadExplorer(view) {
+  ex = view;
+  const valid = new Set(ex.items.map((i) => i.id));
+  sel = new Set([...sel].filter((i) => valid.has(i)));
+  renderStats(); renderLegend(); renderControls(); renderGroups(); renderSelection();
+  $("dlMap").href = `/api/explorer/${ex.session_id}/export`;
+  $("dlReport").href = `/api/explorer/${ex.session_id}/report`;
+  schedulePreview();
+}
+function renderStats() {
+  const c = ex.counts;
+  $("exStats").innerHTML = [["Gaps", c.gaps], ["Groups", c.groups], ["Grouped by you", c.pinned], ["Starred", c.starred]]
+    .map(([l, v]) => `<div class="stat"><b>${esc(v)}</b><span>${esc(l)}</span></div>`).join("");
+}
+function renderMap() {
+  const svg = $("map"); svg.innerHTML = "";
+  const colors = colorMap();
+  const gLasso = el("g", { id: "lassoLayer" });
+  for (const it of ex.items) {
+    const x = px(it.x), y = py(it.y), c = colors[it.group], chosen = sel.has(it.id), r = it.starred ? 11 : 8;
+    const shape = it.human ? el("polygon", { points: `${x},${y - r - 2} ${x + r + 2},${y} ${x},${y + r + 2} ${x - r - 2},${y}` }) : el("circle", { cx: x, cy: y, r });
+    shape.setAttribute("fill", c);
+    shape.setAttribute("stroke", chosen ? "#fff" : it.starred ? "#fde047" : "#0f172a");
+    shape.setAttribute("stroke-width", chosen ? 3 : it.starred ? 2.5 : 1.5);
+    shape.dataset.id = it.id;
+    shape.addEventListener("pointerenter", (e) => showTip(e, it));
+    shape.addEventListener("pointermove", (e) => showTip(e, it));
+    shape.addEventListener("pointerleave", () => { $("tip").style.display = "none"; });
+    svg.appendChild(shape);
+  }
+  svg.appendChild(gLasso);
+}
+function renderLegend() {
+  const colors = colorMap();
+  const human = new Set(ex.groups.filter((g) => g.human).map((g) => g.name));
+  $("legend").innerHTML = Object.keys(colors).map((n) => `<span><i style="background:${colors[n]};border-radius:${human.has(n) ? 0 : 50}%;${human.has(n) ? "transform:rotate(45deg) scale(.8)" : ""}"></i>${esc(n)}</span>`).join("") +
+    `<span>circle = AI group &bull; diamond = your group &bull; gold outline = starred</span>`;
+}
+function renderControls() {
+  const k = $("kRange"); k.max = ex.max_k; k.value = Math.min(ex.k, ex.max_k); $("kVal").textContent = k.value;
+  const sl = $("renameSel"); sl.innerHTML = ex.ai_clusters.map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join("");
+  $("restoreRow").style.display = ex.counts.removed ? "flex" : "none";
+  $("btnRestore").textContent = `Restore ${ex.counts.removed} removed gap(s)`;
+  $("history").innerHTML = [...ex.history].reverse().map((h) => `<li>${esc(h)}</li>`).join("");
+}
+function renderGroups() {
+  const byGroup = {};
+  for (const it of ex.items) (byGroup[it.group] = byGroup[it.group] || []).push(it);
+  const human = new Set(ex.groups.filter((g) => g.human).map((g) => g.name));
+  $("groupList").innerHTML = ex.groups.map((g) => {
+    const items = (byGroup[g.name] || []).map((it) => {
+      const url = safeUrl(it.paper_url), yr = it.year ? ` (${esc(it.year)})` : "";
+      const src = url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(it.paper_title)}</a>` : esc(it.paper_title);
+      return `<li>${it.starred ? "&#9733; " : ""}${esc(it.text)}<small>Source: ${src}${yr} &middot; ${esc(it.kind.replace(/_/g, " "))}</small></li>`;
+    }).join("");
+    return `<details><summary>${human.has(g.name) ? "&#9998; " : ""}${esc(g.name)} &middot; ${g.count} gap(s)</summary><ul>${items}</ul></details>`;
+  }).join("");
+}
+function renderSelection() {
+  $("selInfo").textContent = sel.size + " selected";
+  const none = sel.size === 0;
+  ["btnGroup", "btnStar", "btnRemove", "btnClear"].forEach((b) => ($(b).disabled = none));
+  $("btnUnpin").disabled = ![...sel].some((i) => (ex.items.find((x) => x.id === i) || {}).human);
+  renderMap();
+}
+function showTip(e, it) {
+  const t = $("tip"); t.style.display = "block";
+  t.style.left = Math.min(e.clientX + 14, window.innerWidth - 340) + "px"; t.style.top = (e.clientY + 14) + "px";
+  t.innerHTML = `<b>${esc(it.text.length > 200 ? it.text.slice(0, 200) + "..." : it.text)}</b><br><i>${esc(it.paper_title)}${it.year ? " (" + esc(it.year) + ")" : ""}</i><br><span class="mute">${esc(it.group)}</span>`;
+}
+
+// ------------------------------------------------------------------ lasso selection
+(function setupLasso() {
+  const svg = $("map"); let pts = null, poly = null, moved = false;
+  const toSvg = (e) => { const r = svg.getBoundingClientRect(); return [(e.clientX - r.left) * (W / r.width), (e.clientY - r.top) * (H / r.height)]; };
+  const inside = (p, path) => { let c = false; for (let i = 0, j = path.length - 1; i < path.length; j = i++) {
+    const [xi, yi] = path[i], [xj, yj] = path[j];
+    if ((yi > p[1]) !== (yj > p[1]) && p[0] < ((xj - xi) * (p[1] - yi)) / (yj - yi) + xi) c = !c; } return c; };
+  svg.addEventListener("pointerdown", (e) => {
+    if (!ex) return;
+    svg.setPointerCapture(e.pointerId); pts = [toSvg(e)]; moved = false;
+    poly = el("polyline", { fill: "rgba(96,165,250,.15)", stroke: "#60a5fa", "stroke-width": 2, "stroke-dasharray": "5 4", points: pts.join(" ") });
+    svg.appendChild(poly);
+  });
+  svg.addEventListener("pointermove", (e) => {
+    if (!pts) return; const p = toSvg(e);
+    if (Math.hypot(p[0] - pts[pts.length - 1][0], p[1] - pts[pts.length - 1][1]) > 3) { pts.push(p); moved = true; poly.setAttribute("points", pts.map((q) => q.join(",")).join(" ")); }
+  });
+  const end = (e) => {
+    if (!pts) return;
+    const path = pts, additive = e.shiftKey; pts = null; if (poly) poly.remove(); poly = null;
+    const hit = new Set();
+    if (moved && path.length > 3) { for (const it of ex.items) if (inside([px(it.x), py(it.y)], path)) hit.add(it.id); }
+    else { // a plain click: pick the nearest dot within 14px
+      const p = path[0]; let best = null, bd = 14;
+      for (const it of ex.items) { const d = Math.hypot(px(it.x) - p[0], py(it.y) - p[1]); if (d < bd) { bd = d; best = it.id; } }
+      if (best) hit.add(best);
+    }
+    sel = additive ? new Set([...sel, ...hit]) : hit;
+    renderSelection();
+  };
+  svg.addEventListener("pointerup", end);
+  svg.addEventListener("pointercancel", () => { pts = null; if (poly) poly.remove(); poly = null; });
+})();
+
+// ------------------------------------------------------------------ actions
+async function act(path, body) {
+  $("exErr").textContent = "";
+  try { loadExplorer(await api(`/api/explorer/${ex.session_id}/${path}`, body ?? {})); return true; }
+  catch (e) { $("exErr").textContent = e.message; return false; }
+}
+$("btnGroup").addEventListener("click", async () => {
+  const name = $("groupName").value.trim();
+  if (!name) { $("exErr").textContent = "Give your group a name first."; return; }
+  if (await act("group", { ids: [...sel], name })) { $("groupName").value = ""; sel = new Set(); renderSelection(); }
+});
+$("btnStar").addEventListener("click", () => act("star", { ids: [...sel] }));
+$("btnUnpin").addEventListener("click", () => act("unpin", { ids: [...sel] }));
+$("btnRemove").addEventListener("click", async () => { if (await act("remove", { ids: [...sel] })) { sel = new Set(); renderSelection(); } });
+$("btnClear").addEventListener("click", () => { sel = new Set(); renderSelection(); });
+$("btnRestore").addEventListener("click", () => act("restore"));
+$("btnRename").addEventListener("click", async () => {
+  const id = $("renameSel").value; if (!id) return;
+  await act("rename", { cluster_id: id, name: $("renameTxt").value }); $("renameTxt").value = "";
+});
+$("btnApply").addEventListener("click", () => act("recluster", { k: Number($("kRange").value) }));
+$("kRange").addEventListener("input", () => { $("kVal").textContent = $("kRange").value; schedulePreview(); });
+
+function schedulePreview() { clearTimeout(previewTimer); previewTimer = setTimeout(runPreview, 120); }
+async function runPreview() {
+  if (!ex) return;
+  const k = Number($("kRange").value);
+  try {
+    const p = await api(`/api/explorer/${ex.session_id}/preview`, { k });
+    if (Number($("kRange").value) !== k) return;           // slider moved on; ignore stale answer
+    $("btnApply").disabled = p.unchanged;
+    $("kPreview").innerHTML = p.unchanged ? "This is the current setting. Move the slider to preview a change."
+      : `<b>Preview:</b> k=${p.k} would move <b>${p.moved}</b> of ${p.ai_grouped} AI-grouped gap(s). Your ${p.human_grouped} grouped gap(s) stay exactly where you put them.`;
+    $("movesBox").style.display = p.moves.length ? "block" : "none";
+    $("moves").innerHTML = p.moves.map((m) => `<li>${esc(m.text.slice(0, 110))}<small>${esc(m.from)} &rarr; ${esc(m.to)}</small></li>`).join("");
+  } catch (e) { $("kPreview").textContent = e.message; }
+}
+</script>
+</body>
+</html>
