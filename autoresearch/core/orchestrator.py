@@ -22,14 +22,17 @@ from autoresearch.modules.vision import VisionModule
 from autoresearch.modules.datascience import DataScienceModule
 from autoresearch.modules.iot import IoTModule
 from autoresearch.modules.gap_explorer import GapExplorerService
+from autoresearch.llm import get_llm_client
 
 class AutoResearchOrchestratorV3:
     """
     Enhanced orchestrator with security, vision, data science, and IoT capabilities.
     """
 
-    def __init__(self, mode: str = "full"):
+    def __init__(self, mode: str = "full", llm_client="auto"):
         self.mode = mode
+        # Optional Claude layer: "auto" = on only if ANTHROPIC_API_KEY is set; None = always rule-based.
+        self.llm = get_llm_client() if llm_client == "auto" else llm_client
         self.security = SecurityModule()
         self.vision = VisionModule()
         self.datascience = DataScienceModule()
@@ -38,7 +41,7 @@ class AutoResearchOrchestratorV3:
         # Core agents
         self.agents = {
             "discovery": LiteratureDiscoveryAgent(),
-            "reading": DeepReadingAgent(),
+            "reading": DeepReadingAgent(llm_client=self.llm),
             "network": CitationNetworkBuilder(),
             "gap": GapDetectionAgent(),
             "hypothesis": HypothesisGenerationAgent(),
@@ -149,6 +152,14 @@ class AutoResearchOrchestratorV3:
         report = self.agents["report"].execute(
             discovery, reading, network, gaps, hypotheses, verification, clean_topic
         )
+        llm_brief = None
+        if self.llm:
+            try:
+                llm_brief = self.llm.research_brief(
+                    clean_topic, gaps.get("all_gaps", gaps.get("gaps", [])), [p.get("title", "") for p in papers])
+                report["llm_brief"] = llm_brief
+            except Exception:
+                llm_brief = None  # brief is optional; the rule-based report stands on its own
         self._update_status("report", "complete", report)
         self.iot.send_heartbeat("ReportGenerator")
 
@@ -163,6 +174,8 @@ class AutoResearchOrchestratorV3:
         full_result = {
             "topic": clean_topic,
             "mode": self.mode,
+            "llm": {"enabled": bool(self.llm), "model": getattr(self.llm, "model", None), "brief": llm_brief,
+                    "papers_read_by_llm": sum(1 for a in analyses if a.get("analysis_method") == "llm")},
             "pipeline_stats": {
                 "total_time_seconds": round(elapsed, 2),
                 "papers_found": len(papers),

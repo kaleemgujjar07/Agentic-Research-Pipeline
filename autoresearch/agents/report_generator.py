@@ -40,6 +40,8 @@ class ReportGenerator(BaseAgent):
         md += f"**Generated:** {report['metadata']['generated_at'][:10]}  \n"
         md += f"**System:** {report['metadata']['system']}\n\n---\n\n"
         md += report['executive_summary'] + "\n\n---\n\n"
+        if report.get("llm_brief"):
+            md += "## AI Research Brief (LLM-written, from the detected gaps)\n\n" + report["llm_brief"] + "\n\n---\n\n"
 
         lo = report['literature_overview']
         md += f"## 1. Literature Overview\n\n**Papers Analyzed:** {lo['papers_analyzed']}  \n"

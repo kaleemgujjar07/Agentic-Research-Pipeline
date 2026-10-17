@@ -11,8 +11,8 @@ organise the detected gaps together.
 
 | # | Agent | What it does | How |
 |---|---|---|---|
-| 1 | Literature Discovery | Finds papers on a topic | arXiv + Semantic Scholar APIs (PubMed titles optional), de-duplicated |
-| 2 | Deep Reading | Extracts methods, domains, claims, limitations, metrics | Keyword heuristics (an optional `llm_client` hook exists; no LLM is bundled) |
+| 1 | Literature Discovery | Finds papers on a topic | arXiv + Semantic Scholar + OpenAlex (PubMed optional); retries on rate limits, 1-hour result cache, broader-query fallback, de-duplicated |
+| 2 | Deep Reading | Extracts methods, domains, claims, limitations, metrics | Keyword heuristics by default; **Claude** reads each abstract when an API key is set |
 | 3 | Citation Network | Similarity graph, clusters, bridge papers | Domain/method/author overlap (not real citation links) |
 | 4 | Gap Detection | Methodological, evaluation, temporal, cross-domain and **stated-limitation** gaps | Rules over the reading output; stated limitations keep a link to their source paper |
 | 5 | Hypothesis Generation | One hypothesis per gap | Templates |
@@ -66,12 +66,16 @@ Both front-ends run the same 7-agent orchestrator and the same Gap Explorer serv
 
 Interactive docs: `/docs`.
 
-## Tests
-```bash
-python -m pytest tests -q
-```
-54 tests: agents, explorer logic, the HTTP API (including validation errors), and headless end-to-end runs
-of the Streamlit app. Paper APIs are mocked, so tests run offline.
+
+## Optional: Claude (LLM) mode
+Off by default (the pipeline is rule-based and needs no key). Set `ANTHROPIC_API_KEY` (environment variable, Streamlit secret, or the sidebar box in the app) and:
+- **Deep Reading** has Claude extract methods, domains, claims and *stated* limitations from each abstract (`analysis_method: "llm"`);
+- a short **AI research brief** is written from the detected gaps and added to the report.
+
+Model defaults to `claude-haiku-5-5` (override with `ANTHROPIC_MODEL`). Only titles/abstracts are sent. If a call fails the agent falls back to heuristics, and each paper is labelled `llm` or `heuristic`. LLM output is unverified: check it before relying on it.
+
+## Paper-source reliability
+The free paper APIs rate-limit shared cloud IPs (HTTP 429), which is common on Streamlit Cloud. Discovery retries with backoff, queries three sources, caches successful searches for an hour, and if nothing matches retries with a shorter query. When everything fails the app lists what each source returned. Optional environment variables: `SEMANTIC_SCHOLAR_API_KEY` (free key, higher limits) and `OPENALEX_MAILTO` (your email, OpenAlex's polite pool).
 
 ## Limitations (honest)
 - Agents are rule-based; no LLM. Gap quality depends on what authors write in **abstracts** (no full text).
@@ -90,6 +94,5 @@ of the Streamlit app. Paper APIs are mocked, so tests run offline.
 │   ├── agents/                 # the 7 agents
 │   ├── modules/                # gap_explorer (shared core), security, vision, datascience, iot
 │   └── api/                    # FastAPI app + interactive dashboard
-├── tests/
 └── requirements.txt
 ```

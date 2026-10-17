@@ -7,7 +7,7 @@ from typing import Callable, List
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from autoresearch.core.orchestrator import AutoResearchOrchestratorV3
 
@@ -26,7 +26,16 @@ _DASHBOARD = (Path(__file__).parent / "dashboard.html").read_text(encoding="utf-
 class ResearchRequest(BaseModel):
     topic: str = Field(min_length=3, max_length=300)
     max_papers: int = Field(default=10, ge=1, le=20)
-    sources: List[str] = ["arxiv", "semantic_scholar"]
+    sources: List[str] = ["arxiv", "semantic_scholar", "openalex"]
+
+    @field_validator("sources")
+    @classmethod
+    def _known_sources(cls, v):
+        allowed = {"arxiv", "semantic_scholar", "openalex", "pubmed"}
+        bad = [s for s in v if s not in allowed]
+        if bad or not v:
+            raise ValueError(f"sources must be a non-empty subset of {sorted(allowed)}")
+        return v
 
 
 class KRequest(BaseModel):
@@ -63,7 +72,12 @@ def start_research(request: ResearchRequest):
     """Run the full 7-agent pipeline. Synchronous on purpose: FastAPI runs it in a worker thread."""
     result = orchestrator.run(topic=request.topic, max_papers=request.max_papers, sources=request.sources)
     if "error" in result:
-        raise HTTPException(status_code=400, detail=result["error"])
+        status = (result.get("discovery") or {}).get("source_status") or {}
+        detail = result["error"]
+        if status:
+            detail += ". Sources: " + "; ".join(
+                f"{k}: {v['count']} papers" if v.get("ok") else f"{k}: failed ({v.get('error')})" for k, v in status.items())
+        raise HTTPException(status_code=400, detail=detail)
     return JSONResponse(content=result)
 
 

@@ -1,17 +1,43 @@
-"""Literature Discovery Agent v2 - Multi-source with DB persistence."""
-import requests
+"""Literature Discovery Agent v3 - multi-source, resilient, and explains its failures.
+
+Sources: arXiv, Semantic Scholar, OpenAlex (and PubMed titles, optional).
+Free public APIs rate-limit shared cloud servers, so this agent:
+  * retries with backoff on 429/5xx and network errors,
+  * records what every source returned (``source_status``) instead of failing silently,
+  * retries once with a broader query if nothing at all was found,
+  * caches successful searches for an hour so repeated runs do not re-hit the APIs.
+
+Optional environment variables: SEMANTIC_SCHOLAR_API_KEY, OPENALEX_MAILTO.
+"""
+import copy
+import os
+import re
+import threading
 import time
 import xml.etree.ElementTree as ET
-from typing import Dict, List, Any, Optional
+from typing import Any, Dict, List, Optional
+
+import requests
+
 from autoresearch.agents.base_agent import BaseAgent
 
-class LiteratureDiscoveryAgent(BaseAgent):
-    """Discovers papers from arXiv, Semantic Scholar, and PubMed."""
+DEFAULT_SOURCES = ["arxiv", "semantic_scholar", "openalex"]
+ALL_SOURCES = DEFAULT_SOURCES + ["pubmed"]
 
-    def __init__(self, db_session=None, llm_client=None, config=None):
+
+class LiteratureDiscoveryAgent(BaseAgent):
+    """Discovers papers from arXiv, Semantic Scholar, OpenAlex and (optionally) PubMed."""
+
+    CACHE_TTL_SECONDS = 3600
+    _cache: Dict[Any, Any] = {}
+    _cache_lock = threading.Lock()
+
+    def __init__(self, db_session=None, llm_client=None, config=None, max_retries: int = 2):
         super().__init__("LiteratureDiscovery", db_session, llm_client)
+        self.max_retries = max_retries
+        self.source_status: Dict[str, Dict[str, Any]] = {}
         self.session = requests.Session()
-        self.session.headers.update({"User-Agent": "AutoResearch/2.0 (Academic Research Tool)"})
+        self.session.headers.update({"User-Agent": "AutoResearch/3.0 (Academic Research Tool)"})
 
         if config:
             self.arxiv_base = config.apis.arxiv_base_url
@@ -24,7 +50,7 @@ class LiteratureDiscoveryAgent(BaseAgent):
             self.pubmed_max = config.apis.pubmed_max_results
             self.pubmed_timeout = config.apis.pubmed_timeout
         else:
-            self.arxiv_base = "http://export.arxiv.org/api/query"
+            self.arxiv_base = "https://export.arxiv.org/api/query"
             self.arxiv_max = 20
             self.arxiv_timeout = 15
             self.ss_base = "https://api.semanticscholar.org/graph/v1"
@@ -33,200 +59,286 @@ class LiteratureDiscoveryAgent(BaseAgent):
             self.pubmed_base = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
             self.pubmed_max = 20
             self.pubmed_timeout = 15
+        self.openalex_base = "https://api.openalex.org/works"
+        self.openalex_timeout = 15
 
+    # ------------------------------------------------------------------ cache
+    @classmethod
+    def clear_cache(cls) -> None:
+        with cls._cache_lock:
+            cls._cache.clear()
+
+    # ------------------------------------------------------------------ http
+    @staticmethod
+    def _retry_wait(response, attempt: int) -> float:
+        ra = str(getattr(response, "headers", {}).get("Retry-After", "")).strip()
+        if ra.isdigit():
+            return float(min(int(ra), 5))
+        return float(2 * (attempt + 1))
+
+    def _get(self, url: str, params: Dict, timeout: int, headers: Optional[Dict] = None):
+        """GET with retry/backoff. Raises RuntimeError with a short reason on final failure."""
+        last = "request failed"
+        for attempt in range(self.max_retries + 1):
+            try:
+                r = self.session.get(url, params=params, timeout=timeout, headers=headers)
+                if r.status_code in (429, 500, 502, 503, 504) and attempt < self.max_retries:
+                    wait = self._retry_wait(r, attempt)
+                    last = f"HTTP {r.status_code}"
+                    self.log(f"HTTP {r.status_code} from {url.split('/')[2]}; retrying in {wait:.0f}s", "WARNING")
+                    time.sleep(wait)
+                    continue
+                r.raise_for_status()
+                return r
+            except Exception as e:  # noqa: BLE001 - any failure is reported, never swallowed
+                last = f"{type(e).__name__}: {str(e)[:140]}"
+                transient = isinstance(e, (requests.Timeout, requests.ConnectionError))
+                if transient and attempt < self.max_retries:
+                    time.sleep(1 + attempt)
+                    continue
+                break
+        raise RuntimeError(last)
+
+    def _record(self, source: str, papers: Optional[List[Dict]], error: Optional[str] = None) -> List[Dict]:
+        if error is None:
+            self.source_status[source] = {"ok": True, "count": len(papers or [])}
+            self.metrics["calls"] += 1
+            self.log(f"{source}: {len(papers or [])} papers found")
+            return papers or []
+        self.source_status[source] = {"ok": False, "error": error, "count": 0}
+        self.log(f"{source} error: {error}", "ERROR")
+        return []
+
+    # ------------------------------------------------------------------ sources
     def search_arxiv(self, query: str, max_results: int = None) -> List[Dict]:
         max_results = max_results or self.arxiv_max
         self.log(f"Searching arXiv: '{query}' (max={max_results})")
-
+        words = re.findall(r"\w+", query)[:8]
+        if not words:
+            return self._record("arxiv", [], None)
         try:
             params = {
-                "search_query": f"all:{query}",
+                "search_query": " AND ".join(f"all:{w}" for w in words),
                 "start": 0,
                 "max_results": max_results,
                 "sortBy": "relevance",
-                "sortOrder": "descending"
+                "sortOrder": "descending",
             }
-            response = self.session.get(self.arxiv_base, params=params, timeout=self.arxiv_timeout)
-            response.raise_for_status()
-
+            response = self._get(self.arxiv_base, params, self.arxiv_timeout)
             root = ET.fromstring(response.content)
             ns = {"atom": "http://www.w3.org/2005/Atom"}
 
+            def text(entry, tag):
+                node = entry.find(f"atom:{tag}", ns)
+                return " ".join(node.text.split()) if node is not None and node.text else ""
+
             papers = []
             for entry in root.findall("atom:entry", ns):
+                published = text(entry, "published")
                 paper = {
                     "source": "arXiv",
-                    "external_id": entry.find("atom:id", ns).text.split("/")[-1] if entry.find("atom:id", ns) is not None else "",
-                    "title": entry.find("atom:title", ns).text.strip() if entry.find("atom:title", ns) is not None else "",
-                    "authors": [author.find("atom:name", ns).text for author in entry.findall("atom:author", ns) if author.find("atom:name", ns) is not None],
-                    "published_year": int(entry.find("atom:published", ns).text[:4]) if entry.find("atom:published", ns) is not None else None,
-                    "abstract": entry.find("atom:summary", ns).text.strip() if entry.find("atom:summary", ns) is not None else "",
-                    "url": entry.find("atom:id", ns).text if entry.find("atom:id", ns) is not None else "",
+                    "external_id": text(entry, "id").split("/")[-1],
+                    "title": text(entry, "title"),
+                    "authors": [a.text for a in (au.find("atom:name", ns) for au in entry.findall("atom:author", ns)) if a is not None and a.text],
+                    "published_year": int(published[:4]) if published[:4].isdigit() else None,
+                    "abstract": text(entry, "summary"),
+                    "url": text(entry, "id"),
                     "pdf_url": "",
                     "citation_count": 0,
-                    "venue": "arXiv"
+                    "venue": "arXiv",
                 }
                 for link in entry.findall("atom:link", ns):
                     if link.get("title") == "pdf":
                         paper["pdf_url"] = link.get("href")
                 papers.append(paper)
-
-            self.log(f"arXiv: {len(papers)} papers found")
-            self.metrics["calls"] += 1
-            return papers
-
-        except Exception as e:
-            self.log(f"arXiv error: {str(e)}", "ERROR")
-            return []
+            return self._record("arxiv", papers)
+        except Exception as e:  # noqa: BLE001
+            return self._record("arxiv", None, str(e))
 
     def search_semantic_scholar(self, query: str, max_results: int = None) -> List[Dict]:
         max_results = max_results or self.ss_max
         self.log(f"Searching Semantic Scholar: '{query}' (max={max_results})")
-
         try:
-            url = f"{self.ss_base}/paper/search"
             params = {
                 "query": query,
                 "fields": "title,authors,year,abstract,citationCount,referenceCount,url,openAccessPdf,venue",
-                "limit": max_results
+                "limit": max_results,
             }
-            response = self.session.get(url, params=params, timeout=self.ss_timeout)
-            response.raise_for_status()
-
-            data = response.json()
+            key = os.environ.get("SEMANTIC_SCHOLAR_API_KEY")
+            headers = {"x-api-key": key} if key else None
+            response = self._get(f"{self.ss_base}/paper/search", params, self.ss_timeout, headers)
             papers = []
-            for paper in data.get("data", []):
+            for paper in response.json().get("data") or []:
                 papers.append({
                     "source": "Semantic Scholar",
                     "external_id": paper.get("paperId", ""),
-                    "title": paper.get("title", ""),
-                    "authors": [a.get("name", "") for a in paper.get("authors", [])],
+                    "title": paper.get("title", "") or "",
+                    "authors": [a.get("name", "") for a in paper.get("authors") or []],
                     "published_year": paper.get("year"),
                     "abstract": paper.get("abstract", "") or "",
-                    "url": paper.get("url", ""),
-                    "pdf_url": paper.get("openAccessPdf", {}).get("url", "") if paper.get("openAccessPdf") else "",
+                    "url": paper.get("url", "") or "",
+                    "pdf_url": (paper.get("openAccessPdf") or {}).get("url", ""),
                     "citation_count": paper.get("citationCount", 0) or 0,
                     "reference_count": paper.get("referenceCount", 0) or 0,
-                    "venue": paper.get("venue", "")
+                    "venue": paper.get("venue", "") or "",
                 })
+            return self._record("semantic_scholar", papers)
+        except Exception as e:  # noqa: BLE001
+            return self._record("semantic_scholar", None, str(e))
 
-            self.log(f"Semantic Scholar: {len(papers)} papers found")
-            self.metrics["calls"] += 1
-            return papers
+    @staticmethod
+    def _openalex_abstract(inverted: Optional[Dict[str, List[int]]]) -> str:
+        """OpenAlex ships abstracts as {word: [positions]}; rebuild the text."""
+        if not inverted:
+            return ""
+        by_pos = {}
+        for word, positions in inverted.items():
+            for p in positions:
+                by_pos[p] = word
+        return " ".join(by_pos[p] for p in sorted(by_pos))
 
-        except Exception as e:
-            self.log(f"Semantic Scholar error: {str(e)}", "ERROR")
-            return []
+    def search_openalex(self, query: str, max_results: int = None) -> List[Dict]:
+        max_results = max_results or self.ss_max
+        self.log(f"Searching OpenAlex: '{query}' (max={max_results})")
+        try:
+            params = {"search": query, "per-page": min(max_results, 50), "filter": "has_abstract:true"}
+            if os.environ.get("OPENALEX_MAILTO"):
+                params["mailto"] = os.environ["OPENALEX_MAILTO"]
+            response = self._get(self.openalex_base, params, self.openalex_timeout)
+            papers = []
+            for w in response.json().get("results") or []:
+                loc_source = ((w.get("primary_location") or {}).get("source") or {})
+                papers.append({
+                    "source": "OpenAlex",
+                    "external_id": (w.get("id") or "").rsplit("/", 1)[-1],
+                    "title": w.get("title") or w.get("display_name") or "",
+                    "authors": [((a or {}).get("author") or {}).get("display_name", "") for a in (w.get("authorships") or [])][:10],
+                    "published_year": w.get("publication_year"),
+                    "abstract": self._openalex_abstract(w.get("abstract_inverted_index")),
+                    "url": w.get("doi") or w.get("id") or "",
+                    "pdf_url": (w.get("open_access") or {}).get("oa_url") or "",
+                    "citation_count": w.get("cited_by_count") or 0,
+                    "venue": loc_source.get("display_name") or "",
+                })
+            return self._record("openalex", papers)
+        except Exception as e:  # noqa: BLE001
+            return self._record("openalex", None, str(e))
 
     def search_pubmed(self, query: str, max_results: int = None) -> List[Dict]:
         max_results = max_results or self.pubmed_max
         self.log(f"Searching PubMed: '{query}' (max={max_results})")
-
         try:
-            # Step 1: Search for IDs
-            search_url = f"{self.pubmed_base}/esearch.fcgi"
-            search_params = {
-                "db": "pubmed",
-                "term": query,
-                "retmax": max_results,
-                "retmode": "json"
-            }
-            search_response = self.session.get(search_url, params=search_params, timeout=self.pubmed_timeout)
-            search_response.raise_for_status()
-
-            idlist = search_response.json().get("esearchresult", {}).get("idlist", [])
-
+            search = self._get(f"{self.pubmed_base}/esearch.fcgi",
+                               {"db": "pubmed", "term": query, "retmax": max_results, "retmode": "json"},
+                               self.pubmed_timeout)
+            idlist = search.json().get("esearchresult", {}).get("idlist", [])
             if not idlist:
-                self.log("PubMed: No results")
-                return []
-
-            # Step 2: Fetch summaries
-            summary_url = f"{self.pubmed_base}/esummary.fcgi"
-            summary_params = {
-                "db": "pubmed",
-                "id": ",".join(idlist),
-                "retmode": "json"
-            }
-            summary_response = self.session.get(summary_url, params=summary_params, timeout=self.pubmed_timeout)
-            summary_response.raise_for_status()
-
-            results = summary_response.json().get("result", {})
+                return self._record("pubmed", [])
+            summary = self._get(f"{self.pubmed_base}/esummary.fcgi",
+                                {"db": "pubmed", "id": ",".join(idlist), "retmode": "json"},
+                                self.pubmed_timeout)
+            results = summary.json().get("result", {})
             papers = []
-
             for pmid in idlist:
-                if pmid in results:
-                    article = results[pmid]
-                    papers.append({
-                        "source": "PubMed",
-                        "external_id": f"PMID:{pmid}",
-                        "title": article.get("title", ""),
-                        "authors": [a.get("name", "") for a in article.get("authors", [])],
-                        "published_year": article.get("pubdate", "")[:4] if article.get("pubdate") else None,
-                        "abstract": "",  # Would need separate efetch call
-                        "url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
-                        "pdf_url": "",
-                        "citation_count": 0,
-                        "venue": article.get("fulljournalname", "")
-                    })
+                article = results.get(pmid)
+                if not article:
+                    continue
+                pubdate = article.get("pubdate", "") or ""
+                papers.append({
+                    "source": "PubMed",
+                    "external_id": f"PMID:{pmid}",
+                    "title": article.get("title", ""),
+                    "authors": [a.get("name", "") for a in article.get("authors", [])],
+                    "published_year": int(pubdate[:4]) if pubdate[:4].isdigit() else None,
+                    "abstract": "",  # would need a separate efetch call
+                    "url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
+                    "pdf_url": "",
+                    "citation_count": 0,
+                    "venue": article.get("fulljournalname", ""),
+                })
+            return self._record("pubmed", papers)
+        except Exception as e:  # noqa: BLE001
+            return self._record("pubmed", None, str(e))
 
-            self.log(f"PubMed: {len(papers)} papers found")
-            self.metrics["calls"] += 1
-            return papers
-
-        except Exception as e:
-            self.log(f"PubMed error: {str(e)}", "ERROR")
-            return []
-
+    # ------------------------------------------------------------------ orchestration
     def _deduplicate(self, papers: List[Dict]) -> List[Dict]:
-        """Remove duplicates by title similarity."""
-        seen = {}
-        unique = []
-
+        """Remove duplicates by title; keep the highest citation count."""
+        seen: Dict[str, Dict] = {}
+        unique: List[Dict] = []
         for paper in papers:
-            title_key = paper["title"].lower().strip()[:60]
-            if title_key not in seen:
-                seen[title_key] = paper
+            key = re.sub(r"\W+", " ", (paper.get("title") or "").lower()).strip()[:60]
+            if not key:
+                continue
+            if key not in seen:
+                seen[key] = paper
                 unique.append(paper)
-            else:
-                # Merge citation counts
-                if paper.get("citation_count", 0) > seen[title_key].get("citation_count", 0):
-                    seen[title_key]["citation_count"] = paper["citation_count"]
-
+            elif (paper.get("citation_count") or 0) > (seen[key].get("citation_count") or 0):
+                seen[key]["citation_count"] = paper["citation_count"]
         return unique
+
+    def _search_sources(self, query: str, max_results: int, sources: List[str]) -> List[Dict]:
+        searchers = {
+            "arxiv": self.search_arxiv,
+            "semantic_scholar": self.search_semantic_scholar,
+            "openalex": self.search_openalex,
+            "pubmed": self.search_pubmed,
+        }
+        papers: List[Dict] = []
+        for name in sources:
+            if name not in searchers:
+                self.source_status[name] = {"ok": False, "error": "unknown source", "count": 0}
+                continue
+            papers.extend(searchers[name](query, max_results))
+            time.sleep(0.5)  # be polite to free APIs
+        return papers
 
     def execute(self, query: str, max_results: int = 10, sources: List[str] = None) -> Dict[str, Any]:
         self.start_timer()
+        sources = [s for s in (sources or DEFAULT_SOURCES)]
+        cache_key = (query.strip().lower(), max_results, tuple(sources))
 
-        if sources is None:
-            sources = ["arxiv", "semantic_scholar"]
+        with self._cache_lock:
+            hit = self._cache.get(cache_key)
+        if hit and time.time() - hit[0] < self.CACHE_TTL_SECONDS:
+            self.log("Discovery served from cache")
+            cached = copy.deepcopy(hit[1])
+            cached["from_cache"] = True
+            self.stop_timer()
+            return cached
 
         self.log(f"Starting discovery for: '{query}'")
-        all_papers = []
+        self.source_status = {}
+        all_papers = self._search_sources(query, max_results, sources)
 
-        if "arxiv" in sources:
-            all_papers.extend(self.search_arxiv(query, max_results))
-            time.sleep(1)
+        broadened = None
+        words = query.split()
+        if not any(p.get("title") for p in all_papers) and len(words) > 3:
+            broadened = " ".join(words[:3])
+            self.log(f"Nothing found; retrying with broader query '{broadened}'", "WARNING")
+            all_papers = self._search_sources(broadened, max_results, sources)
 
-        if "semantic_scholar" in sources:
-            all_papers.extend(self.search_semantic_scholar(query, max_results))
-            time.sleep(0.5)
+        # papers without an abstract carry nothing the downstream agents can read
+        with_abstract = [p for p in all_papers if (p.get("abstract") or "").strip()]
+        if with_abstract:
+            all_papers = with_abstract
 
-        if "pubmed" in sources:
-            all_papers.extend(self.search_pubmed(query, max_results))
-
-        unique_papers = self._deduplicate(all_papers)
-        unique_papers.sort(key=lambda x: x.get("citation_count", 0) or 0, reverse=True)
-
+        unique = self._deduplicate(all_papers)
+        unique.sort(key=lambda x: x.get("citation_count", 0) or 0, reverse=True)
         duration = self.stop_timer()
 
         result = {
             "query": query,
-            "total_found": len(unique_papers),
-            "papers": unique_papers[:max_results],
+            "broadened_query": broadened,
+            "total_found": len(unique),
+            "papers": unique[:max_results],
             "sources_searched": sources,
+            "source_status": copy.deepcopy(self.source_status),
+            "from_cache": False,
             "agent": self.name,
-            "duration_seconds": round(duration, 2)
+            "duration_seconds": round(duration, 2),
         }
-
-        self.log(f"Discovery complete: {len(unique_papers)} unique papers in {duration:.1f}s")
+        if unique:  # never cache a failure
+            with self._cache_lock:
+                self._cache[cache_key] = (time.time(), copy.deepcopy(result))
+        self.log(f"Discovery complete: {len(unique)} unique papers in {duration:.1f}s")
         return result

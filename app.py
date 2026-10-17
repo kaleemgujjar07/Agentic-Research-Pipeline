@@ -19,7 +19,7 @@ with st.sidebar:
     st.markdown(
         """
         1️⃣ **Literature Discovery** – arXiv + Semantic Scholar  
-        2️⃣ **Deep Reading** – methods, domains, limitations (heuristic)  
+        2️⃣ **Deep Reading** – methods, domains, limitations (Claude if a key is set, else heuristic)  
         3️⃣ **Citation Network** – similarity graph + clusters  
         4️⃣ **Gap Detection** – methodological, evaluation, stated limitations…  
         5️⃣ **Hypothesis Generation** – template-based  
@@ -30,7 +30,10 @@ with st.sidebar:
         """
     )
     st.markdown("---")
-    st.caption("The agents are rule-based (no LLM is bundled). The Gap Explorer is where human judgement enters.")
+    st.caption("Rule-based by default. Add an Anthropic API key to let Claude read the papers and write a brief. "
+               "The Gap Explorer is where human judgement enters.")
+    user_key = st.text_input("Anthropic API key (optional)", type="password",
+                             help="Used only for this session; never stored or logged.")
     st.caption("💡 Try: vision transformers, graph neural networks, federated learning")
 
 with st.form("form"):
@@ -43,7 +46,17 @@ if submitted:
         st.error("❌ Enter a valid research topic (≥3 characters).")
     else:
         # One orchestrator per browser session: it owns this session's Gap Explorer state.
-        orch = st.session_state.setdefault("orch", AutoResearchOrchestratorV3(mode="full"))
+        from autoresearch.llm import get_llm_client
+        try:
+            secret_key = st.secrets.get("ANTHROPIC_API_KEY", "")
+        except Exception:
+            secret_key = ""
+        llm = get_llm_client(user_key or secret_key) or get_llm_client()
+        # Rebuild the orchestrator only when the LLM on/off state changes, so Gap Explorer state is kept otherwise.
+        if "orch" not in st.session_state or st.session_state.get("orch_llm_key") != (user_key or secret_key):
+            st.session_state["orch"] = AutoResearchOrchestratorV3(mode="full", llm_client=llm)
+            st.session_state["orch_llm_key"] = user_key or secret_key
+        orch = st.session_state["orch"]
         with st.spinner("Running 7 agents (retrieval from public APIs can take 30–60 s)…"):
             result = orch.run(topic.strip(), max_papers=max_papers)
         st.session_state["result"] = result
@@ -54,11 +67,23 @@ if result:
         st.error(f"{result['error']}. Try a broader topic.")
         for f in result.get("findings", []):
             st.caption(str(f))
+        status = (result.get("discovery") or {}).get("source_status") or {}
+        if status:
+            st.markdown("**What each source returned:**")
+            for src, s in status.items():
+                outcome = f"{s.get('count', 0)} papers" if s.get("ok") else f"failed ({s.get('error', 'unknown error')})"
+                st.markdown(f"- `{src}`: {outcome}")
+            if not any(s.get("ok") for s in status.values()):
+                st.info("Every source failed. This is usually a temporary rate limit on the free paper APIs. "
+                        "Wait a minute and try again; successful searches are cached for an hour.")
     else:
         orch = st.session_state["orch"]
         stats = result["pipeline_stats"]
         papers = result["stages"]["discovery"]["papers"]
-        st.success(f"✅ Pipeline complete in {stats['total_time_seconds']}s. {len(papers)} real papers analysed.")
+        disc = result["stages"]["discovery"]
+        note = f" (served from cache)" if disc.get("from_cache") else ""
+        note += f" (no matches for the full query, so searched '{disc['broadened_query']}')" if disc.get("broadened_query") else ""
+        st.success(f"✅ Pipeline complete in {stats['total_time_seconds']}s. {len(papers)} real papers analysed{note}.")
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Papers", stats["papers_found"])
         c2.metric("Gaps detected", stats["gaps_detected"])
@@ -85,6 +110,12 @@ if result:
             st.info(gx.get("reason", "No gaps to organise."))
 
         st.markdown("---")
+        llm_info = result.get("llm", {})
+        if llm_info.get("brief"):
+            st.header("🧠 AI research brief")
+            st.caption(f"Written by {llm_info['model']} from the detected gaps; "
+                       f"{llm_info['papers_read_by_llm']} paper(s) read by the LLM. Verify before relying on it.")
+            st.write(llm_info["brief"])
         st.header("💡 Hypotheses (template-based, automated screening)")
         for h in result["stages"]["verification"].get("verified_hypotheses", [])[:6]:
             st.markdown(f"- {h['hypothesis']}  \n  _feasibility: {h.get('feasibility', 'n/a')}_")

@@ -7,6 +7,3 @@ requests
 # FastAPI backend (autoresearch/api) - not needed for the Streamlit demo
 fastapi
 uvicorn
-# tests
-pytest
-httpx
